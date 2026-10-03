@@ -5,6 +5,14 @@ status changes.
 
 _Last updated: 2026-10-03 (open-source alpha readiness cleanup); 2026-09-27 (UI refresh merged); 2026-09-24 (Linux dev-setup: `Electron uninstall` after a version bump; 2026-09-22: `obfuscate` field strategy; backtick DDL normalisation + interleaved drops; framework catalogue + classification provenance; `structure` table class; dump drop-tables option + encoding declaration built; ponytail audit reviewed and accepted cuts applied; workspace export/import built; Example Shop extract findings below)_
 
+## Future feature — cross-dialect dumps (noted 2026-10-03)
+
+Allow the output SQL dialect to differ from the source database dialect, for example
+MySQL source → SQLite dump, so realistic subsets can be used locally with a different
+database engine. Deferred; no implementation or release target agreed. Current dumps
+still use the source dialect. Future work needs schema/type conversion and compatible
+data serialization, while retaining the existing selection and anonymization guarantees.
+
 ## Fresh public repository — 2026-10-03
 
 The new phibrenet/Masq remote was verified empty. Its initial commit contains the current source
