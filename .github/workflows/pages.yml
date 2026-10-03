@@ -1,0 +1,47 @@
+# Publishes the interactive diagrams in docs/diagrams to GitHub Pages.
+#
+# Dormant while the repo is private: GitHub Pages isn't available for private repos on the
+# free plan, so the job is skipped (not failed) until the repo is public. To go live, make
+# the repo public, then Settings → Pages → Source: "GitHub Actions", and re-run this workflow.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/diagrams/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Only the published diagrams — the visual-check files are local QA output.
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp docs/diagrams/dialect-connections.html _site/
+          cp docs/diagrams/dialect-connections.html _site/index.html
+
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,354 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Masq \u2014 how each database dialect connects",
+    "locale": "en",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "renderer",
+      "type": "frontend",
+      "label": "Vue renderer",
+      "sublabel": "screens + Pinia stores",
+      "pos": [
+        30,
+        240
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "preload",
+      "type": "security",
+      "label": "Preload bridge",
+      "sublabel": "window.api only",
+      "pos": [
+        240,
+        240
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "ipc",
+      "type": "backend",
+      "label": "IPC handlers",
+      "sublabel": "config \u00b7 source \u00b7 extract",
+      "tag": "sender checked",
+      "pos": [
+        450,
+        240
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "config",
+      "type": "database",
+      "label": "Config store",
+      "sublabel": "config.sqlite3",
+      "pos": [
+        450,
+        420
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "tag": "+ OS keychain"
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "Extract pipeline",
+      "sublabel": "subset + anonymize",
+      "pos": [
+        680,
+        240
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "writer",
+      "type": "backend",
+      "label": "Dump writer",
+      "sublabel": "DumpDialect \u2192 .sql",
+      "pos": [
+        680,
+        420
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "mysql",
+      "type": "backend",
+      "label": "MySQLAdapter",
+      "sublabel": "knex + mysql2",
+      "pos": [
+        920,
+        100
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "backend",
+      "label": "PostgresAdapter",
+      "sublabel": "knex + pg \u00b7 pg_dump",
+      "pos": [
+        920,
+        240
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "sqlite",
+      "type": "backend",
+      "label": "SQLiteAdapter",
+      "sublabel": "knex + better-sqlite3",
+      "pos": [
+        920,
+        420
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "mysqldb",
+      "type": "database",
+      "label": "MySQL / MariaDB",
+      "sublabel": "TCP :3306",
+      "pos": [
+        1170,
+        100
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "pgdb",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "TCP :5432",
+      "pos": [
+        1170,
+        240
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "sqlitedb",
+      "type": "database",
+      "label": "SQLite file",
+      "sublabel": "local .sqlite",
+      "pos": [
+        1170,
+        420
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "dumpfile",
+      "type": "external",
+      "label": "SQL dump file",
+      "sublabel": "combined, or schema + data",
+      "tag": "written .partial, then renamed",
+      "pos": [
+        680,
+        560
+      ],
+      "size": [
+        160,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Renderer process (sandboxed)",
+      "wraps": [
+        "renderer",
+        "preload"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Electron main process",
+      "wraps": [
+        "ipc",
+        "config",
+        "pipeline",
+        "writer",
+        "mysql",
+        "postgres",
+        "sqlite"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Sources (read-only)",
+      "wraps": [
+        "mysqldb",
+        "pgdb",
+        "sqlitedb"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "r-p",
+      "from": "renderer",
+      "to": "preload",
+      "label": "window.api",
+      "variant": "emphasis"
+    },
+    {
+      "id": "p-i",
+      "from": "preload",
+      "to": "ipc",
+      "label": "invoke",
+      "variant": "emphasis"
+    },
+    {
+      "id": "i-c",
+      "from": "ipc",
+      "to": "config",
+      "label": "rules \u00b7 strategies",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        525,
+        362
+      ]
+    },
+    {
+      "id": "i-x",
+      "from": "ipc",
+      "to": "pipeline",
+      "label": "runExtract",
+      "variant": "emphasis"
+    },
+    {
+      "id": "x-m",
+      "from": "pipeline",
+      "to": "mysql",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "x-p",
+      "from": "pipeline",
+      "to": "postgres",
+      "label": "DbAdapter",
+      "variant": "emphasis"
+    },
+    {
+      "id": "x-s",
+      "from": "pipeline",
+      "to": "sqlite"
+    },
+    {
+      "id": "x-w",
+      "from": "pipeline",
+      "to": "writer",
+      "label": "row streams",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        760,
+        362
+      ]
+    },
+    {
+      "id": "m-db",
+      "from": "mysql",
+      "to": "mysqldb",
+      "label": "read-only session"
+    },
+    {
+      "id": "p-db",
+      "from": "postgres",
+      "to": "pgdb",
+      "label": "read-only session"
+    },
+    {
+      "id": "s-db",
+      "from": "sqlite",
+      "to": "sqlitedb",
+      "label": "readonly open"
+    },
+    {
+      "id": "w-f",
+      "from": "writer",
+      "to": "dumpfile",
+      "label": "workspace dump folder",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        760,
+        522
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "violet",
+      "title": "One adapter per dialect",
+      "items": [
+        "withSourceAdapter picks MySQL, Postgres or SQLite from the connection",
+        "createKnex sets exact-value parsing per driver",
+        "SQL Server is rejected until its adapter exists"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Dialect-specific DDL",
+      "items": [
+        "MySQL: SHOW CREATE TABLE",
+        "Postgres: pg_dump --schema-only (must be on PATH)",
+        "SQLite: sqlite_master SQL verbatim"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Never writes to a source",
+      "items": [
+        "Server sources open read-only sessions",
+        "SQLite files open with readonly: true",
+        "Passwords decrypted from the OS keychain in main only"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,167 @@
+/*
+ * Fonts are bundled, never fetched: the app must render correctly offline. Only the weights the UI
+ * uses are imported, and only the Latin subset files come along with each (fontsource splits them by
+ * unicode-range, so the browser downloads nothing it doesn't need).
+ */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import './tokens.css';
+@import './base.css';
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+  user-select: none;
+  /* Behind the naive-ui layout — keeps overscroll and scrollbar gutters on-theme. */
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
+}
+
+/* ─── Scrollbars ─────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--line) / 0.1);
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--line) / 0.2);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ─── Shared type roles ──────────────────────────────────────────────────── */
+
+/* Every database identifier: table and column names, `table.column` edges, hosts, databases. */
+.mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+/* Counts and numbers line up down a column. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.text-muted {
+  color: rgb(var(--fg-muted));
+}
+
+.text-subtle {
+  color: rgb(var(--fg-subtle));
+}
+
+.text-danger {
+  color: rgb(var(--danger));
+}
+
+/* ─── Page scaffolding (every view uses these) ───────────────────────────── */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.page-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.page-title {
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: rgb(var(--fg));
+}
+
+.page-desc {
+  font-size: 14px;
+  line-height: 20px;
+  color: rgb(var(--fg-muted));
+  max-width: 760px;
+}
+
+.page-desc strong {
+  color: rgb(var(--fg));
+  font-weight: 500;
+}
+
+/* A compact row of controls under the header. Wraps rather than squeezing. */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.toolbar__spacer {
+  flex: 1;
+}
+
+/* Section headings inside a page (e.g. "Declared", "Detected in the source"). */
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgb(var(--fg-muted));
+}
+
+/* Inline code inside prose. */
+.page-desc code,
+.prose-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: var(--radius-badge);
+  background: rgb(var(--surface-3));
+}
+
+/* ─── Interaction ────────────────────────────────────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid rgb(var(--accent) / 0.6);
+  outline-offset: 2px;
+}
+
+/* Loading placeholder rows. */
+.skeleton {
+  border-radius: var(--radius-control);
+  background: rgb(var(--surface-2));
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}

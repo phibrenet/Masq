@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "Vue.volar",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "EditorConfig.EditorConfig",
+    "qwtel.sqlite-viewer",
+    "mtxr.sqltools"
+  ],
+  "unwantedRecommendations": [
+    "octref.vetur",
+    "Vue.vscode-typescript-vue-plugin"
+  ]
+}
