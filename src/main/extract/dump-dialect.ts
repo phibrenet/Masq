@@ -29,7 +29,7 @@ export interface DumpDialect {
   insertModifier?: string
   /**
    * Session settings emitted before anything else in the file — the statements that tell the
-   * loading client how to *read* everything that follows. Two things, both of which have produced
+   * loading client how to *read* everything that follows. Three things, all of which have produced
    * a dump that loads on one machine and not another:
    *
    * **Encoding.** A per-dialect constant, deliberately **not** read from the source database. The
@@ -44,6 +44,11 @@ export interface DumpDialect {
    * `standard_conforming_strings`. Both default differently across servers, so a file that says
    * nothing is read according to whatever the *importing* machine happens to be configured for.
    * Pinning them is what makes the file mean the same thing everywhere.
+   *
+   * **Time zone.** A MySQL `TIMESTAMP` literal is read in the session's time zone, so a file that
+   * says nothing is read in the importing machine's zone — and a value inside that zone's
+   * spring-forward gap (`2026-03-29 01:47:51` under Europe/London) is rejected outright. MySQL only;
+   * Postgres `timestamptz` text carries its own offset, and plain `timestamp` is never converted.
    *
    * Undefined for SQLite: its encoding is fixed when the database file is created, and it has no
    * session quoting mode a script could set.
@@ -180,14 +185,25 @@ export const mysqlDumpDialect: DumpDialect = {
   // Done on a comma-wrapped copy so the token is matched whole wherever it sits in the list, then
   // the new mode is appended and the stray commas trimmed — which also covers an empty starting
   // mode, where a bare `CONCAT` would leave a leading comma that MySQL rejects.
+  //
+  // `time_zone` is pinned to UTC because the TIMESTAMP values were *read* in UTC: `createKnex` pins
+  // the source session to `+00:00` too, and the two only work as a pair (this is what mysqldump's
+  // default `--tz-utc` does). Reported from an import: left to the importing session's zone
+  // (Europe/London), `2026-03-29 01:47:51` fell in the hour the clocks skipped and the load failed
+  // with `Incorrect datetime value`. UTC has no gaps, so no TIMESTAMP value can be rejected that way.
   sessionSettings: [
     `SET NAMES ${mysqlEscape('utf8mb4')};`,
     'SET @MASQ_OLD_SQL_MODE = @@SESSION.sql_mode;',
     "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(REPLACE(" +
       "CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','), " +
-      "'NO_AUTO_VALUE_ON_ZERO'));"
+      "'NO_AUTO_VALUE_ON_ZERO'));",
+    'SET @MASQ_OLD_TIME_ZONE = @@SESSION.time_zone;',
+    "SET SESSION time_zone = '+00:00';"
   ].join('\n'),
-  sessionRestore: 'SET SESSION sql_mode = @MASQ_OLD_SQL_MODE;',
+  sessionRestore: [
+    'SET SESSION time_zone = @MASQ_OLD_TIME_ZONE;',
+    'SET SESSION sql_mode = @MASQ_OLD_SQL_MODE;'
+  ].join('\n'),
   disableForeignKeys: 'SET FOREIGN_KEY_CHECKS=0;',
   enableForeignKeys: 'SET FOREIGN_KEY_CHECKS=1;',
   dropTable: (table) => `DROP TABLE IF EXISTS ${mysqlEscapeId(table)};`,

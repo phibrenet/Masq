@@ -229,6 +229,50 @@ describe('encoding declaration', () => {
   })
 })
 
+describe('time zone', () => {
+  it('reads MySQL TIMESTAMPs as UTC, the zone they were extracted in', async () => {
+    // From a failed import: left to the importing session's zone (Europe/London),
+    // `2026-03-29 01:47:51` fell in the hour the clocks skipped and MySQL rejected the row.
+    const sql = await combined({ dialect: mysqlDumpDialect })
+
+    expect(sql).toContain("SET SESSION time_zone = '+00:00';")
+    // Before the first row, or that row is read in the importing machine's zone.
+    expect(sql.indexOf("SET SESSION time_zone = '+00:00';")).toBeLessThan(
+      sql.indexOf('INSERT INTO')
+    )
+  })
+
+  it('restores the time zone it changed, after the FK toggle', async () => {
+    const sql = await combined({ dialect: mysqlDumpDialect })
+
+    expect(sql).toContain('SET @MASQ_OLD_TIME_ZONE = @@SESSION.time_zone;')
+    expect(sql.indexOf('SET FOREIGN_KEY_CHECKS=1;')).toBeLessThan(
+      sql.indexOf('SET SESSION time_zone = @MASQ_OLD_TIME_ZONE;')
+    )
+  })
+
+  it('appears in both files of a split dump', async () => {
+    const schema = collect()
+    const data = collect()
+    await writeSplitDump(schema.stream, data.stream, {
+      tables: await fixture(),
+      dialect: mysqlDumpDialect
+    })
+
+    // The schema file needs it too: SHOW CREATE TABLE renders a TIMESTAMP default in the session zone.
+    expect(schema.text()).toContain("SET SESSION time_zone = '+00:00';")
+    expect(data.text()).toContain("SET SESSION time_zone = '+00:00';")
+  })
+
+  it('leaves Postgres and SQLite alone', async () => {
+    // Postgres `timestamptz` text carries its own offset; SQLite has no time zone to set.
+    expect(await combined({ dialect: createPostgresDumpDialect(['public']) })).not.toContain(
+      'time_zone'
+    )
+    expect(await combined({ dialect: sqliteDumpDialect })).not.toContain('time_zone')
+  })
+})
+
 describe('stream errors', () => {
   it('rejects the writer, rather than crashing the process, when the file errors between rows', async () => {
     // A file stream reports a full disk as an `error` event. If that fires while the writer is
