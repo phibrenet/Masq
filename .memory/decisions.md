@@ -9,6 +9,34 @@ Entries below marked _(from spec v1)_ were established in the initial technical 
 
 ---
 
+## 2026-10-30 — MySQL TIMESTAMPs are read and dumped in UTC (`time_zone = '+00:00'` on both sides)
+
+Reported from an import: a DBeaver restore on a Mac in Europe/London failed with `Incorrect
+datetime value: '2026-03-29 01:47:51'` on `audits.created_at`, a `TIMESTAMP`. MySQL reads a
+TIMESTAMP literal in the session's time zone, and the dump didn't set one, so it was read in
+London time. Clocks skipped 01:00–02:00 that night, so the value doesn't exist there.
+
+The dump now sets `SET SESSION time_zone = '+00:00'` in `mysqlDumpDialect.sessionSettings` and
+restores the old zone at the end, like `sql_mode`. **The source session is pinned to `+00:00` as
+well** (`createKnex`), because the dump line alone would be wrong. With `dateStrings: true` a
+TIMESTAMP comes back as text in the *source* session's zone. Under a London session a stored `12:00`
+UTC reads as `13:00`, and a UTC-declaring dump would then load it an hour late. The two settings only
+work as a pair, which is what mysqldump's default `--tz-utc` does.
+
+Both checked against MySQL 8.0.36 on a London-zone Mac:
+- The insert fails under `SYSTEM` and succeeds under `+00:00`.
+- `createKnex` reads the value back unshifted.
+- A generated dump loads both rows exactly.
+- `SHOW CREATE TABLE` renders a TIMESTAMP *default* in the session zone too, so the schema file
+  needs the setting as well.
+
+Side effects:
+- `DATETIME` is never converted, so it is untouched.
+- A raw predicate's `NOW()` now returns UTC. That matches the documented UTC assumption in
+  `resolveCutoff`, but it moves a `DATETIME` comparison on a source that stores local wall-clock
+  times.
+- Postgres needs nothing: `timestamptz` text carries its own offset.
+
 ## 2026-10-03 — Start the public repository from a source snapshot
 
 The owner created a new phibrenet/Masq repository after choosing to keep development history
@@ -47,6 +75,7 @@ A clean install reported one HTTP-cache advisory propagated into eight high-seve
 through electron-builder. An in-range transitive update and npm audit fix dry run did not resolve it;
 retain the lockfile and record the finding rather than force unrelated Electron upgrades or silently
 ignore the advisory. Production build, lint, typecheck and 280 tests pass with the clean install.
+
 
 
 ## 2026-09-29 — README screenshots come from a synthetic database; diagram Pages site is dormant

@@ -71,13 +71,22 @@ export function createKnex(connection: Connection, password?: string): Knex {
    * because a selection rule's raw predicate is user text spliced into a query, and rules arrive in
    * imported workspaces too. Credentials with write access are still better avoided — this is the
    * backstop, not the recommendation.
+   *
+   * The read-only switch is always the first statement; any that follow are run in order after it,
+   * and the first error stops the connection from joining the pool.
    */
-  const readOnlyPool = (statement: string): Knex.PoolConfig => ({
+  const readOnlyPool = (...statements: string[]): Knex.PoolConfig => ({
     ...pool,
     afterCreate: (
       conn: { query: (sql: string, cb: (err: Error | null) => void) => void },
       done: (err: Error | null, conn: unknown) => void
-    ) => conn.query(statement, (err) => done(err, conn))
+    ) => {
+      const run = (i: number): void => {
+        if (i === statements.length) return done(null, conn)
+        conn.query(statements[i], (err) => (err ? done(err, conn) : run(i + 1)))
+      }
+      run(0)
+    }
   })
 
   switch (connection.dialect) {
@@ -110,7 +119,13 @@ export function createKnex(connection: Connection, password?: string): Knex {
           supportBigNumbers: true,
           dateStrings: true
         },
-        pool: readOnlyPool('SET SESSION TRANSACTION READ ONLY')
+        /**
+         * `dateStrings` hands back a TIMESTAMP as text in the *session's* time zone, so the session
+         * is pinned to UTC: the dump declares `+00:00` (`mysqlDumpDialect.sessionSettings`) and the
+         * two only agree if both say it. Left at the server's zone, every TIMESTAMP would load
+         * shifted by that zone's offset. DATETIME isn't converted, so this doesn't touch it.
+         */
+        pool: readOnlyPool('SET SESSION TRANSACTION READ ONLY', "SET SESSION time_zone = '+00:00'")
       })
 
     case 'postgres':
