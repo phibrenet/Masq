@@ -5,6 +5,8 @@ import { finished } from 'stream/promises'
 import type { Writable } from 'stream'
 import type {
   Connection,
+  FieldStrategy,
+  FieldStrategyException,
   FieldStrategyRule,
   Row,
   Run,
@@ -46,6 +48,7 @@ import { detectLinkTables, linkTableFilters, type LinkFilterReport } from './lin
 import { filterAddressable, primaryKeyColumn } from './pk'
 import type { RowFilter } from './row-filter'
 import { anonymizeRow, readPath } from './anonymize'
+import { validateConditions } from './conditions'
 import { fakerFor } from './locale'
 import { topologicalOrder } from './graph'
 import {
@@ -178,6 +181,7 @@ export async function executePipeline(
   const morphRelations = listMorphRelationsByWorkspace(workspaceId)
   const identitySources = listTableIdentitySourcesByWorkspace(workspaceId)
   const backfillPolicies = listFkBackfillPoliciesByWorkspace(workspaceId)
+  checkFieldStrategies(fieldStrategies)
 
   const classByTable = new Map(classifications.map((c) => [c.tableName, c.class]))
   const classOf = (t: string): string => classByTable.get(t) ?? 'transactional' // absence = default
@@ -344,10 +348,16 @@ export async function executePipeline(
 
   // ── Per-table strategy + locale lookups ──
   const strategiesByTable = new Map<string, Map<string, FieldStrategyRule>>()
+  const exceptionsByTable = new Map<string, Map<string, FieldStrategyException>>()
   for (const fs of fieldStrategies) {
     const m = strategiesByTable.get(fs.tableName) ?? new Map<string, FieldStrategyRule>()
     m.set(fs.columnName, fs.rule)
     strategiesByTable.set(fs.tableName, m)
+    if (fs.exception) {
+      const e = exceptionsByTable.get(fs.tableName) ?? new Map<string, FieldStrategyException>()
+      e.set(fs.columnName, fs.exception)
+      exceptionsByTable.set(fs.tableName, e)
+    }
   }
   // Both of these are per-table "where does this value come from" hints, resolved per row below.
   const localeByTable = new Map(localeSources.map((l) => [l.tableName, l]))
@@ -440,6 +450,11 @@ export async function executePipeline(
   const dumpTables: DumpTable[] = []
   for (const table of ordered) {
     const columns = await adapter.getColumns(table)
+    checkExceptionColumns(
+      table,
+      exceptionsByTable.get(table),
+      columns.map((c) => c.name)
+    )
     // Database-computed columns are dropped from the INSERT list — both dialects reject an explicit
     // value for them, and the value is recomputed on load. Rows still *stream* every column (the
     // DDL and the anonymizer see the full set); only the INSERT tuple is narrowed.
@@ -459,6 +474,8 @@ export async function executePipeline(
         link: linkFilters.filters.get(table),
         selection: selection.get(table),
         strategies: strategiesByTable.get(table),
+        exceptions: exceptionsByTable.get(table),
+        now,
         localeSource: localeByTable.get(table),
         identitySource: identityByTable.get(table),
         entityCountry,
@@ -558,6 +575,43 @@ function declaredIdentity(row: Row, source: TableIdentitySource | undefined): st
   return ownIdentity(source.identityTable, String(value))
 }
 
+/**
+ * Refuse a strategy whose exception couldn't be read back, and compile every exception regex, before
+ * the run touches the source. Same stance as a damaged selection rule (`planRule`): guessing what a
+ * damaged exception meant could leave real values in the dump.
+ */
+function checkFieldStrategies(strategies: FieldStrategy[]): void {
+  const damaged = strategies.find((fs) => fs.invalid)
+  if (damaged)
+    throw new Error(
+      `The field strategy for "${damaged.tableName}.${damaged.columnName}" can't be run: ` +
+        `${damaged.invalid}. Open it on the Field Strategies screen and save it again.`
+    )
+  for (const fs of strategies)
+    if (fs.exception) validateConditions(fs.exception.conditions, fs.tableName)
+}
+
+/**
+ * An exception that tests a column the table hasn't got never matches, so every row would silently
+ * get the main rule. That is a leak whenever the main rule is the weaker one (preserve, except for
+ * customers), so it fails the run instead. Checked while the dump plan is built, before any file.
+ */
+function checkExceptionColumns(
+  table: string,
+  exceptions: Map<string, FieldStrategyException> | undefined,
+  columnNames: string[]
+): void {
+  if (!exceptions) return
+  const names = new Set(columnNames)
+  for (const [column, exception] of exceptions)
+    for (const c of exception.conditions)
+      if (c.column !== null && !names.has(c.column))
+        throw new Error(
+          `The exception on "${table}.${column}" tests "${c.column}", which "${table}" doesn't ` +
+            `have. Fix it on the Field Strategies screen.`
+        )
+}
+
 interface RowStreamCtx {
   reference: boolean
   /** `structure` class: emit the DDL, never a row. Checked before every other decision. */
@@ -569,6 +623,10 @@ interface RowStreamCtx {
   link: RowFilter | undefined
   selection: TableSelection | undefined
   strategies: Map<string, FieldStrategyRule> | undefined
+  /** Column → the exception to its strategy, for the columns that have one. */
+  exceptions: Map<string, FieldStrategyException> | undefined
+  /** The run's single instant, shared with selection so `withinLast` means one thing everywhere. */
+  now: Date
   /** Where this table's rows get their country from (column, or a path inside it). */
   localeSource: TableLocaleSource | undefined
   /** Declared owning entity for this table's rows, overriding the cascade's inference. */
@@ -665,6 +723,9 @@ function buildRowStream(adapter: DbAdapter, table: string, ctx: RowStreamCtx): A
             )
             out = anonymizeRow(row, {
               strategies,
+              exceptions: ctx.exceptions,
+              pkColumn: selection.pkColumn,
+              now: ctx.now,
               identityKey,
               rowKey: ownIdentity(table, pk),
               faker,

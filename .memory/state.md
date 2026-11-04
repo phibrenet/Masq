@@ -3,7 +3,38 @@
 Always answers: "if I sat down right now, what would I work on?" Update whenever build
 status changes.
 
-_Last updated: 2026-10-03 (open-source alpha readiness cleanup); 2026-09-27 (UI refresh merged); 2026-09-24 (Linux dev-setup: `Electron uninstall` after a version bump; 2026-09-22: `obfuscate` field strategy; backtick DDL normalisation + interleaved drops; framework catalogue + classification provenance; `structure` table class; dump drop-tables option + encoding declaration built; ponytail audit reviewed and accepted cuts applied; workspace export/import built; Example Shop extract findings below)_
+_Last updated: 2026-11-04 (field-strategy exceptions, ID-keyed emails; exampleEmail/ipAddress generators, obfuscate before, NULL stays NULL, template redact/remove leak fixed); 2026-10-03 (open-source alpha readiness cleanup); 2026-09-27 (UI refresh merged); 2026-09-24 (Linux dev-setup: `Electron uninstall` after a version bump; 2026-09-22: `obfuscate` field strategy; backtick DDL normalisation + interleaved drops; framework catalogue + classification provenance; `structure` table class; dump drop-tables option + encoding declaration built; ponytail audit reviewed and accepted cuts applied; workspace export/import built; Example Shop extract findings below)_
+
+## Built 2026-11-04: field-strategy exceptions + ID-keyed emails (migration 018, uncommitted)
+
+- A strategy can have one exception: a different rule for rows matching conditions (the
+  selection-rule operators). The run refuses a damaged exception, or one testing a missing column.
+- Generators `userIdEmail` (`user1234@example.com`) and `userIdEmailKeepDomain` (keeps the domain).
+- Export/import carry exceptions and every new generator and obfuscate option; a round-trip test
+  covers them.
+- The selection-rule form's condition editor moved into the shared `ConditionEditor.vue`.
+
+Intended setup for the staff/customer case: `users.email` → Email from ID, with an exception for
+emails ending in the staff domain → Email from ID, keep domain. The workspace's staff **preserve**
+rule must go (the owner is removing it), or staff rows never reach a field strategy.
+
+Why: see the 2026-11-04 entries in `decisions.md`. Lint, typecheck, 335 tests and a production
+build pass. The built app was driven with Playwright against a throwaway `--user-data-dir`: a
+strategy with an exception saved, reloaded, and was cleared by unticking; a selection rule saved
+through the shared condition editor. **Not verified:** a real extract against the live source.
+
+## Built 2026-11-04: new field strategies + NULL handling (migration 017, uncommitted)
+
+- `fake` generators `exampleEmail` (example.com/.org/.net only) and `ipAddress` (IPv4).
+- `obfuscate` side `before`: scramble everything before the last delimiter (default `@`). Migration
+  017 adds `obfuscate_delimiter`.
+- `fake` and template `fake` bindings leave NULL as NULL.
+- Fixed: template "Redact"/"Remove" choices were saved as unknown generators and leaked the real
+  value. Stored sentinels are repaired on read. **Dumps made before this fix may contain those
+  values.**
+
+Why: see the 2026-11-04 entry in `decisions.md`. Lint, typecheck and 310 tests pass. **Not verified:**
+the form wasn't driven in the running app, and no real extract was run with the new strategies.
 
 ## Future feature — cross-dialect dumps (noted 2026-10-03)
 

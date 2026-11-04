@@ -65,7 +65,8 @@ const TABLES: Record<string, { columns: ColumnInfo[]; rows: Row[] }> = {
     columns: [column('id', true), column('email')],
     rows: [
       { id: 1, email: 'a@example.com' },
-      { id: 2, email: 'b@example.com' }
+      // A staff address: the exception cases below give this domain a rule of its own.
+      { id: 2, email: 'jo.staff@acme.com' }
     ]
   },
   sessions: {
@@ -317,5 +318,59 @@ describe('which classification puts a table in the dump', () => {
     expect(sql).toContain('INSERT INTO `users`')
     expect(sql).not.toContain('a@example.com')
     expect(sql).not.toContain('inserted-during-extract@example.test')
+  })
+})
+
+describe('field strategy exceptions', () => {
+  function staffException(workspaceId: string, conditionColumn = 'email'): void {
+    createSelectionRule({
+      workspaceId,
+      table: 'users',
+      match: 'all',
+      where: [],
+      take: { kind: 'all' },
+      anonymize: true
+    })
+    createFieldStrategy({
+      workspaceId,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'fake', generator: 'userIdEmail' },
+      exception: {
+        match: 'all',
+        conditions: [{ column: conditionColumn, op: 'endsWith', value: '@acme.com' }],
+        rule: { kind: 'fake', generator: 'userIdEmailKeepDomain' }
+      }
+    })
+  }
+
+  it('gives matching rows the exception and the rest the main rule, leaking neither email', async () => {
+    const ws = createWorkspace({ name: 'Staff exception' })
+    staffException(ws.id)
+
+    const sql = await dumpFor(ws.id)
+
+    expect(sql).toContain("'user1@example.com'")
+    expect(sql).toContain("'user2@acme.com'")
+    expect(sql).not.toContain('a@example.com')
+    expect(sql).not.toContain('jo.staff')
+  })
+
+  it('refuses to run an exception that tests a column the table has not got', async () => {
+    // It would never match, so every row would quietly get the main rule instead.
+    const ws = createWorkspace({ name: 'Exception on a missing column' })
+    staffException(ws.id, 'work_email')
+
+    await expect(dumpFor(ws.id)).rejects.toThrow(/tests "work_email"/)
+  })
+
+  it('refuses to run a strategy whose exception could not be read back', async () => {
+    const ws = createWorkspace({ name: 'Damaged exception' })
+    staffException(ws.id)
+    getDb()
+      .prepare('UPDATE field_strategies SET exception_json = ? WHERE workspace_id = ?')
+      .run('{not json', ws.id)
+
+    await expect(dumpFor(ws.id)).rejects.toThrow(/can't be run/)
   })
 })

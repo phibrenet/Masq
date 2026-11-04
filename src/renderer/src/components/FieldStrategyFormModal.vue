@@ -1,35 +1,55 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import {
+  NAlert,
   NButton,
+  NCheckbox,
   NForm,
   NFormItem,
   NInput,
-  NInputNumber,
   NModal,
-  NRadioButton,
-  NRadioGroup,
   NSelect,
   NSpin,
   NTag,
   NText,
   useMessage,
   type FormInst,
-  type FormRules,
-  type SelectGroupOption
+  type FormRules
 } from 'naive-ui'
 import type { FieldStrategyInput } from '@shared/api'
 import type {
   ColumnInfo,
-  FakeGenerator,
   FieldStrategy,
+  FieldStrategyException,
   FieldStrategyKind,
   FieldStrategyRule,
   JsonPathInfo,
-  ObfuscateSide,
+  MatchMode,
   TemplateBinding
 } from '@shared/types'
-import { OBFUSCATE_MIN_COUNT } from '@shared/types'
+import {
+  blankRuleDraft,
+  ruleDraftFrom,
+  ruleDraftRules,
+  ruleFromDraft,
+  type RuleDraft
+} from '@renderer/lib/ruleDraft'
+import {
+  invalidRegex,
+  toCondition,
+  toDraft,
+  type DraftCondition
+} from '@renderer/lib/conditionDraft'
+import { generatorOptions } from '@renderer/lib/generatorOptions'
+import ConditionEditor from '@renderer/components/ConditionEditor.vue'
+import RuleOptionFields from '@renderer/components/RuleOptionFields.vue'
+import {
+  LEAVE_AS_IS,
+  REDACT,
+  REMOVE,
+  bindingChoice,
+  bindingFromChoice
+} from '@renderer/lib/templateBindings'
 import { useFieldStrategiesStore } from '@renderer/stores/fieldStrategies'
 import { useTableClassificationsStore } from '@renderer/stores/tableClassifications'
 import { useDiscoveryStore } from '@renderer/stores/discovery'
@@ -65,92 +85,8 @@ const kindOptions: { label: string; value: FieldStrategyKind }[] = [
   { label: 'Template (anonymize inside JSON)', value: 'template' }
 ]
 
-/** "Leave as-is" is the default for every discovered path — a template only changes what you bind. */
-const LEAVE_AS_IS = ''
-/**
- * Sentinels for the two non-generator actions, so one dropdown per path covers every choice. They
- * can't collide with a `FakeGenerator` name, and `toRule` maps them back to a `TemplateAction`.
- */
-const REDACT = '__redact__'
-const REMOVE = '__remove__'
-
-/** Generators grouped by category (spec §8 / the FakeGenerator ↔ faker mapping in types.ts). */
-const generatorOptions: SelectGroupOption[] = [
-  {
-    type: 'group',
-    label: 'Person',
-    key: 'person',
-    children: [
-      { label: 'First name', value: 'firstName' },
-      { label: 'Surname', value: 'lastName' },
-      { label: 'Full name', value: 'fullName' }
-    ]
-  },
-  {
-    type: 'group',
-    label: 'Contact',
-    key: 'contact',
-    children: [
-      { label: 'Email', value: 'email' },
-      { label: 'Phone', value: 'phone' }
-    ]
-  },
-  {
-    type: 'group',
-    label: 'Address',
-    key: 'address',
-    children: [
-      { label: 'Street address (line 1)', value: 'streetAddress' },
-      { label: 'Address line 2', value: 'secondaryAddress' },
-      { label: 'City', value: 'city' },
-      { label: 'State / region', value: 'state' },
-      { label: 'Postcode', value: 'zipCode' },
-      { label: 'Country', value: 'country' },
-      { label: 'Country code (GB, US, NL)', value: 'countryCode' }
-    ]
-  },
-  {
-    type: 'group',
-    label: 'Finance',
-    key: 'finance',
-    children: [
-      { label: 'Credit card number', value: 'creditCardNumber' },
-      { label: 'Credit card CVV', value: 'creditCardCVV' },
-      { label: 'IBAN', value: 'iban' }
-    ]
-  },
-  {
-    type: 'group',
-    label: 'Company',
-    key: 'company',
-    children: [{ label: 'Company name', value: 'companyName' }]
-  },
-  {
-    type: 'group',
-    label: 'Text',
-    key: 'text',
-    children: [
-      { label: 'Lorem words (short — titles)', value: 'loremWords' },
-      { label: 'Lorem sentence (medium)', value: 'loremSentence' },
-      { label: 'Lorem paragraph (long — text columns)', value: 'loremParagraph' }
-    ]
-  },
-  {
-    type: 'group',
-    label: 'Web',
-    key: 'web',
-    children: [
-      { label: 'Avatar / portrait image URL', value: 'avatarUrl' },
-      { label: 'Website URL', value: 'url' }
-    ]
-  },
-  {
-    type: 'group',
-    label: 'Dates',
-    key: 'dates',
-    children: [{ label: 'Date of birth (YYYY-MM-DD)', value: 'dateOfBirth' }]
-  }
-]
+/** An exception can be any kind but a template, which has its own path builder. */
+const exceptionKindOptions = kindOptions.filter((o) => o.value !== 'template')
 
 /** Transactional universe — same rationale as the selection-rule modal's table picker. */
 const tableOptions = computed(() => {
@@ -168,54 +104,70 @@ const tableOptions = computed(() => {
     .map((name) => ({ label: name, value: name }))
 })
 
-interface FormState {
+/** The exception being edited. `on` is the checkbox; nothing is saved while it's off. */
+interface ExceptionDraft {
+  on: boolean
+  match: MatchMode
+  conditions: DraftCondition[]
+  rule: RuleDraft
+}
+
+/** The main rule's settings sit flat on the form (it is a `RuleDraft`), next to the template ones. */
+interface FormState extends RuleDraft {
   tableName: string
   columnName: string
-  kind: FieldStrategyKind
-  generator: FakeGenerator
-  percent: number | null
-  obfuscateSide: ObfuscateSide
-  obfuscateCount: number | null
   /** path → generator, or `LEAVE_AS_IS`. Keyed by path so discovery and saved bindings merge cleanly. */
   bindings: Record<string, string>
   /** Paths typed by hand, for when discovery finds nothing (no source, empty column). */
   extraPaths: string[]
+  exception: ExceptionDraft
+}
+
+/** Staff-domain emails are the motivating case, so a new exception starts on keep-domain emails. */
+function blankException(): ExceptionDraft {
+  return {
+    on: false,
+    match: 'all',
+    conditions: [],
+    rule: { ...blankRuleDraft('fake'), generator: 'userIdEmailKeepDomain' }
+  }
 }
 
 function blankForm(): FormState {
   return {
+    ...blankRuleDraft('fake'),
     tableName: '',
     columnName: '',
-    kind: 'fake',
-    generator: 'fullName',
-    percent: 10,
-    obfuscateSide: 'last',
-    obfuscateCount: OBFUSCATE_MIN_COUNT,
     bindings: {},
-    extraPaths: []
+    extraPaths: [],
+    exception: blankException()
+  }
+}
+
+function fromException(e: FieldStrategyException | undefined): ExceptionDraft {
+  if (!e) return blankException()
+  return {
+    on: true,
+    match: e.match,
+    conditions: e.conditions.map(toDraft),
+    rule: ruleDraftFrom(e.rule)
   }
 }
 
 function fromStrategy(s: FieldStrategy): FormState {
   const bindings: Record<string, string> = {}
   if (s.rule.kind === 'template') {
-    for (const b of s.rule.bindings) {
-      bindings[b.path] =
-        b.action === 'redact' ? REDACT : b.action === 'remove' ? REMOVE : (b.generator ?? '')
-    }
+    for (const b of s.rule.bindings) bindings[b.path] = bindingChoice(b)
   }
   return {
+    ...ruleDraftFrom(s.rule),
     tableName: s.tableName,
     columnName: s.columnName,
-    kind: s.rule.kind,
-    generator: s.rule.kind === 'fake' ? s.rule.generator : 'fullName',
-    percent: s.rule.kind === 'jitter' ? s.rule.percent : 10,
-    obfuscateSide: s.rule.kind === 'obfuscate' ? s.rule.side : 'last',
-    obfuscateCount: s.rule.kind === 'obfuscate' ? s.rule.count : OBFUSCATE_MIN_COUNT,
     bindings,
     // A saved binding whose path discovery doesn't return (different sample, or no source at all) must
     // still be visible and editable — otherwise saving would silently drop it.
-    extraPaths: s.rule.kind === 'template' ? s.rule.bindings.map((b) => b.path) : []
+    extraPaths: s.rule.kind === 'template' ? s.rule.bindings.map((b) => b.path) : [],
+    exception: fromException(s.exception)
   }
 }
 
@@ -372,63 +324,54 @@ watch(
   }
 )
 
-const rules = computed<FormRules>(() => ({
-  tableName: { required: true, message: 'A table is required', trigger: ['blur', 'change'] },
-  columnName: { required: true, message: 'A column is required', trigger: ['blur', 'input'] },
-  percent:
-    model.kind === 'jitter'
-      ? {
-          validator: () =>
-            (model.percent ?? 0) > 0 ? true : new Error('Enter a positive percentage'),
-          trigger: ['blur', 'change']
-        }
-      : {},
-  obfuscateCount:
-    model.kind === 'obfuscate'
-      ? {
-          validator: () =>
-            (model.obfuscateCount ?? 0) >= OBFUSCATE_MIN_COUNT
-              ? true
-              : new Error(
-                  `Scramble at least ${OBFUSCATE_MIN_COUNT} characters — fewer leaves the value ` +
-                    `re-identifiable by anyone holding the originals.`
-                ),
-          trigger: ['blur', 'change']
-        }
-      : {}
-}))
+const rules = computed<FormRules>(() => {
+  const r: FormRules = {
+    tableName: { required: true, message: 'A table is required', trigger: ['blur', 'change'] },
+    columnName: { required: true, message: 'A column is required', trigger: ['blur', 'input'] },
+    ...(model.kind === 'template' ? {} : ruleDraftRules(model))
+  }
+  if (model.exception.on) r.exception = { rule: ruleDraftRules(model.exception.rule) }
+  return r
+})
 
 /** Build the discriminated rule union from the flat form state. */
 function toRule(): FieldStrategyRule {
-  switch (model.kind) {
-    case 'template': {
-      // Only bound paths are persisted; "leave as-is" is the absence of a binding, not a stored value.
-      const bindings: TemplateBinding[] = templateRows.value
-        .filter(
-          (r) => r.path.trim() && model.bindings[r.path] && model.bindings[r.path] !== LEAVE_AS_IS
-        )
-        .map((r) => ({ path: r.path.trim(), generator: model.bindings[r.path] as FakeGenerator }))
-      return { kind: 'template', bindings }
-    }
-    case 'fake':
-      return { kind: 'fake', generator: model.generator }
-    case 'jitter':
-      return { kind: 'jitter', percent: model.percent ?? 0 }
-    case 'obfuscate':
-      return {
-        kind: 'obfuscate',
-        side: model.obfuscateSide,
-        count: model.obfuscateCount ?? OBFUSCATE_MIN_COUNT
-      }
-    case 'redact':
-      return { kind: 'redact' }
-    default:
-      return { kind: 'preserve' }
+  if (model.kind !== 'template') return ruleFromDraft(model)
+  // Only bound paths are persisted; "leave as-is" is the absence of a binding, not a stored value.
+  const bindings = templateRows.value
+    .map((r) => bindingFromChoice(r.path, model.bindings[r.path]))
+    .filter((b): b is TemplateBinding => b !== null)
+  return { kind: 'template', bindings }
+}
+
+/** The exception to save, or `null` to clear it (sent explicitly, so an edit removes a stored one). */
+function toException(): FieldStrategyException | null {
+  const e = model.exception
+  if (!e.on) return null
+  return {
+    match: e.match,
+    conditions: e.conditions.map((c) => toCondition(c, columns.value)),
+    rule: ruleFromDraft(e.rule)
   }
 }
 
+/** What's wrong with the exception as drafted, checked on save; `null` when it can be saved. */
+function exceptionProblem(): string | null {
+  const e = model.exception
+  if (!e.on) return null
+  if (e.conditions.length === 0)
+    return 'Add a condition to the exception, or untick it. An exception with none would apply to every row.'
+  if (e.conditions.some((c) => !c.column.trim())) return 'Every exception condition needs a column.'
+  return invalidRegex(e.conditions)
+}
+
 function toInput(): Omit<FieldStrategyInput, 'workspaceId'> {
-  return { tableName: model.tableName.trim(), columnName: model.columnName.trim(), rule: toRule() }
+  return {
+    tableName: model.tableName.trim(),
+    columnName: model.columnName.trim(),
+    rule: toRule(),
+    exception: toException()
+  }
 }
 
 async function submit(): Promise<void> {
@@ -439,6 +382,11 @@ async function submit(): Promise<void> {
   try {
     await formRef.value?.validate()
   } catch {
+    return
+  }
+  const problem = exceptionProblem()
+  if (problem) {
+    message.error(problem)
     return
   }
 
@@ -466,9 +414,15 @@ async function submit(): Promise<void> {
     v-model:show="show"
     preset="card"
     :title="isEdit ? 'Edit field strategy' : 'New field strategy'"
-    :style="{ width: '520px', maxWidth: '92vw' }"
+    :style="{ width: model.exception.on ? '760px' : '520px', maxWidth: '94vw' }"
     :mask-closable="!saving"
   >
+    <!-- What's shown is what could be read; saving replaces the stored strategy with it. -->
+    <n-alert v-if="strategy?.invalid" type="warning" :bordered="false" class="invalid">
+      This strategy's exception couldn't be read back — {{ strategy.invalid }}. Runs are refused
+      until it's saved again. Check the exception below before saving; saving replaces it with
+      exactly what's here.
+    </n-alert>
     <n-form ref="formRef" :model="model" :rules="rules" label-placement="top">
       <div class="row">
         <n-form-item label="Table" path="tableName" class="row__item">
@@ -496,47 +450,7 @@ async function submit(): Promise<void> {
         <n-select v-model:value="model.kind" :options="kindOptions" />
       </n-form-item>
 
-      <n-form-item v-if="model.kind === 'fake'" label="Generator" path="generator">
-        <n-select v-model:value="model.generator" :options="generatorOptions" />
-      </n-form-item>
-
-      <template v-if="model.kind === 'obfuscate'">
-        <n-form-item label="Scramble">
-          <n-radio-group v-model:value="model.obfuscateSide">
-            <n-radio-button value="first" label="First characters" />
-            <n-radio-button value="last" label="Last characters" />
-          </n-radio-group>
-        </n-form-item>
-        <n-form-item label="How many" path="obfuscateCount">
-          <div class="obf">
-            <n-input-number
-              v-model:value="model.obfuscateCount"
-              :min="OBFUSCATE_MIN_COUNT"
-              :show-button="false"
-              :placeholder="String(OBFUSCATE_MIN_COUNT)"
-              class="obf__count"
-            />
-            <n-text depth="3" class="hint">
-              Letters become random letters and digits random digits, so the value keeps its shape —
-              <code>ACE-2024-XY7781</code> scrambled on the last 6 reads
-              <code>ACE-2024-QM3419</code>. Dashes, dots and spaces are left alone. A value shorter
-              than this is scrambled in full, and the same input always gives the same output so
-              joins on the column survive.
-            </n-text>
-          </div>
-        </n-form-item>
-      </template>
-
-      <n-form-item v-if="model.kind === 'jitter'" label="Jitter %" path="percent">
-        <n-input-number
-          v-model:value="model.percent"
-          :min="1"
-          :max="100"
-          :show-button="false"
-          placeholder="10"
-          class="grow"
-        />
-      </n-form-item>
+      <RuleOptionFields v-if="model.kind !== 'template'" v-model:draft="model" path-prefix="" />
 
       <template v-if="model.kind === 'template'">
         <n-form-item label="JSON paths">
@@ -634,6 +548,36 @@ async function submit(): Promise<void> {
       <n-text v-else-if="model.kind === 'preserve'" depth="3" class="hint">
         Preserve copies the value unchanged — the default for any column without a strategy.
       </n-text>
+
+      <!-- ── Exception ─────────────────────────────────────────────────── -->
+      <section class="exc">
+        <n-checkbox v-model:checked="model.exception.on">
+          Use a different strategy for some rows
+        </n-checkbox>
+        <template v-if="model.exception.on">
+          <n-text depth="3" class="hint">
+            Rows matching these conditions get the strategy below instead. Conditions see the
+            original values, before anything is anonymized — for example, email ends with
+            <code>@acme.com</code> → Email from ID, keep domain.
+          </n-text>
+          <ConditionEditor
+            v-model:conditions="model.exception.conditions"
+            v-model:match="model.exception.match"
+            :columns="columns"
+            empty-hint="Add at least one condition."
+          />
+          <n-form-item label="Strategy for those rows">
+            <n-select v-model:value="model.exception.rule.kind" :options="exceptionKindOptions" />
+          </n-form-item>
+          <RuleOptionFields v-model:draft="model.exception.rule" path-prefix="exception.rule." />
+          <n-text v-if="model.exception.rule.kind === 'redact'" depth="3" class="hint">
+            Those rows get NULL.
+          </n-text>
+          <n-text v-else-if="model.exception.rule.kind === 'preserve'" type="warning" class="hint">
+            Those rows keep their real value in the dump.
+          </n-text>
+        </template>
+      </section>
     </n-form>
 
     <template #footer>
@@ -648,17 +592,6 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
-.obf {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 100%;
-}
-
-.obf__count {
-  width: 120px;
-}
-
 .tpl {
   display: block;
   width: 100%;
@@ -721,6 +654,19 @@ code {
   display: block;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.exc {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid rgb(var(--line) / 0.06);
+}
+
+.invalid {
+  margin-bottom: 18px;
 }
 
 .footer {
