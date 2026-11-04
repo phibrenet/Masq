@@ -113,3 +113,70 @@ describe('obfuscate', () => {
     expect(OBFUSCATE_MIN_COUNT).toBe(6)
   })
 })
+
+describe('obfuscate before a delimiter', () => {
+  const beforeAt: FieldStrategyRule = { kind: 'obfuscate', side: 'before', delimiter: '@' }
+
+  it('scrambles everything before the delimiter and keeps the rest byte-identical', () => {
+    const input = 'jane.doe@acme.co.uk'
+    const out = run(input, beforeAt, 'email') as string
+
+    expect(out).toHaveLength(input.length)
+    expect(out.endsWith('@acme.co.uk')).toBe(true)
+    expect(out).toMatch(/^[a-z]{4}\.[a-z]{3}@acme\.co\.uk$/)
+    expect(out.slice(0, 8)).not.toBe('jane.doe')
+  })
+
+  it('splits on the last occurrence, which hides more when the delimiter repeats', () => {
+    const out = run('ACE-2024-XY7781', { kind: 'obfuscate', side: 'before', delimiter: '-' })
+
+    expect(out).toMatch(/^[A-Z]{3}-\d{4}-XY7781$/)
+    expect((out as string).slice(0, 8)).not.toBe('ACE-2024')
+  })
+
+  it('accepts a delimiter longer than one character', () => {
+    const out = run('Jane Doe <jane@acme.com>', {
+      kind: 'obfuscate',
+      side: 'before',
+      delimiter: ' <'
+    }) as string
+
+    expect(out.endsWith(' <jane@acme.com>')).toBe(true)
+    expect(out).toMatch(/^[A-Z][a-z]{3} [A-Z][a-z]{2} </)
+  })
+
+  it('scrambles a value with no delimiter in full rather than passing it through', () => {
+    // The rule exists to hide the prefix; a value it can't split must not leave untouched.
+    const out = run('janedoe', beforeAt, 'email') as string
+
+    expect(out).toMatch(/^[a-z]{7}$/)
+    expect(out).not.toBe('janedoe')
+  })
+
+  it('treats an empty delimiter as missing, so the whole value is scrambled', () => {
+    const out = run('janedoe', { kind: 'obfuscate', side: 'before', delimiter: '' }) as string
+    expect(out).toMatch(/^[a-z]{7}$/)
+    expect(out).not.toBe('janedoe')
+  })
+
+  it('maps the same input to the same output', () => {
+    expect(run('jane.doe@acme.com', beforeAt, 'email')).toBe(
+      run('jane.doe@acme.com', beforeAt, 'email')
+    )
+    expect(run('jane.doe@acme.com', beforeAt, 'email')).not.toBe(
+      run('john.doe@acme.com', beforeAt, 'email')
+    )
+  })
+
+  it('leaves null and non-textual values untouched', () => {
+    expect(run(null, beforeAt)).toBeNull()
+    expect(run('', beforeAt)).toBe('')
+    const buffer = Buffer.from('a@b')
+    expect(run(buffer, beforeAt)).toBe(buffer)
+  })
+
+  it('counts astral characters as single characters', () => {
+    const out = run('🎯ab@x.com', beforeAt) as string
+    expect(out).toMatch(/^🎯[a-z]{2}@x\.com$/)
+  })
+})

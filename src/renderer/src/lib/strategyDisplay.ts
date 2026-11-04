@@ -1,4 +1,10 @@
-import type { FakeGenerator, FieldStrategyKind, FieldStrategyRule } from '@shared/types'
+import type {
+  FakeGenerator,
+  FieldStrategyException,
+  FieldStrategyKind,
+  FieldStrategyRule
+} from '@shared/types'
+import { describeCondition } from './conditions'
 
 /**
  * How a field strategy reads on screen: a short label for its badge, the full detail for a tooltip,
@@ -28,7 +34,9 @@ export function strategyLabel(rule: FieldStrategyRule): string {
     case 'jitter':
       return `${kind} · ±${rule.percent}%`
     case 'obfuscate':
-      return `${kind} · ${rule.side} ${rule.count}`
+      return rule.side === 'before'
+        ? `${kind} · before "${rule.delimiter}"`
+        : `${kind} · ${rule.side} ${rule.count}`
     case 'template': {
       const n = rule.bindings.length
       return `${kind} · ${n} field${n === 1 ? '' : 's'}`
@@ -53,7 +61,10 @@ const FAKE_EXAMPLES: Record<FakeGenerator, [string, string]> = {
   firstName: ['Jane', 'Marcus'],
   lastName: ['Doe', 'Okafor'],
   fullName: ['Jane Doe', 'Marcus Okafor'],
-  email: ['jane@acme.com', 'k.morris@example.net'],
+  email: ['jane@acme.com', 'k.morris@hotmail.com'],
+  exampleEmail: ['jane@acme.com', 'k.morris@example.net'],
+  userIdEmail: ['jane@acme.com', 'user1234@example.com'],
+  userIdEmailKeepDomain: ['jane@acme.com', 'user1234@acme.com'],
   phone: ['07700 900123', '01632 960555'],
   streetAddress: ['12 High St', '48 Willow Lane'],
   secondaryAddress: ['Flat 2', 'Apt. 914'],
@@ -71,7 +82,8 @@ const FAKE_EXAMPLES: Record<FakeGenerator, [string, string]> = {
   loremParagraph: ['Customer said…', 'Lorem ipsum dolor sit…'],
   dateOfBirth: ['1984-03-12', '1991-11-07'],
   avatarUrl: ['…/me.jpg', '…/avatars/42.jpg'],
-  url: ['https://jane.dev', 'https://example.net/']
+  url: ['https://jane.dev', 'https://example.net/'],
+  ipAddress: ['192.0.2.146', '198.51.100.23']
 }
 
 /** A representative `[before, after]` for a rule, or `null` when there's nothing useful to show. */
@@ -88,6 +100,16 @@ export function strategyExample(rule: FieldStrategyRule): [string, string] | nul
       return ['1000.00', (1000 * (1 + rule.percent / 200)).toFixed(2)]
     case 'obfuscate': {
       // Character class is preserved (letter → letter, digit → digit), so the example does the same.
+      if (rule.side === 'before') {
+        const before = 'jane.doe@acme.com'
+        const at = before.lastIndexOf(rule.delimiter)
+        // The example is only illustrative, so it doesn't seed faker: a fixed lowercase stand-in.
+        const scramble = (text: string): string =>
+          text.replace(/[a-z]/g, (_, i: number) => 'qzkdwlmx'[i % 8])
+        return at === -1
+          ? [before, scramble(before)]
+          : [before, scramble(before.slice(0, at)) + before.slice(at)]
+      }
       const before = 'ACE-2024-XY7781'
       const scrambled = 'QMRV3419KT'
       const chars = [...before]
@@ -110,4 +132,10 @@ export function strategyExample(rule: FieldStrategyRule): [string, string] | nul
     default:
       return null
   }
+}
+
+/** An exception in one line: `Fake · userIdEmailKeepDomain where email ends with "@acme.com"`. */
+export function exceptionSummary(exception: FieldStrategyException): string {
+  const joiner = exception.match === 'any' ? ' or ' : ' and '
+  return `${strategyLabel(exception.rule)} where ${exception.conditions.map(describeCondition).join(joiner)}`
 }

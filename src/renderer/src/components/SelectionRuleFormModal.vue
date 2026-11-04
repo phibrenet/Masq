@@ -3,7 +3,6 @@ import { computed, reactive, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
-  NCheckbox,
   NForm,
   NFormItem,
   NInput,
@@ -19,23 +18,15 @@ import {
 } from 'naive-ui'
 import type { SelectionRuleInput } from '@shared/api'
 import { rawWhereError } from '@shared/raw-where'
-import type {
-  ColumnInfo,
-  Condition,
-  ConditionOp,
-  DurationUnit,
-  MatchMode,
-  SelectionRule,
-  SelectionRulePreview
-} from '@shared/types'
+import type { ColumnInfo, MatchMode, SelectionRule, SelectionRulePreview } from '@shared/types'
+import { columnFamily } from '@renderer/lib/conditions'
 import {
-  DURATION_UNITS,
-  columnFamily,
-  isNegativeOp,
-  operatorsFor,
-  valueKindOf,
-  type ColumnFamily
-} from '@renderer/lib/conditions'
+  invalidRegex,
+  toCondition,
+  toDraft,
+  type DraftCondition
+} from '@renderer/lib/conditionDraft'
+import ConditionEditor from '@renderer/components/ConditionEditor.vue'
 import { useSelectionRulesStore } from '@renderer/stores/selectionRules'
 import { useTableClassificationsStore } from '@renderer/stores/tableClassifications'
 import { useDiscoveryStore } from '@renderer/stores/discovery'
@@ -64,11 +55,6 @@ const discovery = useDiscoveryStore()
 const workspace = useWorkspaceStore()
 const message = useMessage()
 
-const matchOptions: { label: string; value: MatchMode }[] = [
-  { label: 'Match all', value: 'all' },
-  { label: 'Match any', value: 'any' }
-]
-
 /**
  * Suggest the transactional universe: every discovered table plus every explicitly-classified one,
  * minus those classified `reference`/`excluded` (selection rules only apply to transactional
@@ -90,21 +76,6 @@ const tableOptions = computed(() => {
     .map((name) => ({ label: name, value: name }))
 })
 
-/**
- * A condition mid-edit. Kept flatter than the persisted `Condition` so each input binds to its own
- * field — the value is a string, a list, or an (n, unit) pair depending on the operator, and
- * switching operators shouldn't discard what the others held.
- */
-interface DraftCondition {
-  column: string
-  op: ConditionOp
-  text: string
-  listText: string
-  n: number | null
-  unit: DurationUnit
-  includeNulls: boolean
-}
-
 interface FormState {
   table: string
   match: MatchMode
@@ -116,19 +87,6 @@ interface FormState {
   orderBy: string
   dir: 'asc' | 'desc'
   anonymize: boolean
-}
-
-function blankCondition(): DraftCondition {
-  return {
-    column: '',
-    op: 'contains',
-    text: '',
-    listText: '',
-    n: 90,
-    unit: 'day',
-    // Matches the engine's default: a negative operator matches NULLs unless told otherwise.
-    includeNulls: true
-  }
 }
 
 function blankForm(): FormState {
@@ -143,20 +101,6 @@ function blankForm(): FormState {
     orderBy: '',
     dir: 'desc',
     anonymize: true
-  }
-}
-
-function toDraft(c: Condition): DraftCondition {
-  const duration = (c.value ?? {}) as { n?: number; unit?: DurationUnit }
-  const isDuration = c.op === 'withinLast' || c.op === 'olderThan'
-  return {
-    column: c.column ?? '',
-    op: c.op,
-    text: isDuration || Array.isArray(c.value) ? '' : String(c.value ?? ''),
-    listText: Array.isArray(c.value) ? c.value.join('\n') : '',
-    n: isDuration ? (duration.n ?? 90) : 90,
-    unit: isDuration ? (duration.unit ?? 'day') : 'day',
-    includeNulls: c.includeNulls !== false
   }
 }
 
@@ -220,10 +164,6 @@ watch(
   }
 )
 
-const columnOptions = computed(() =>
-  columns.value.map((c) => ({ label: c.name, value: c.name, dataType: c.dataType }))
-)
-
 /** Columns that can order a `top` take — anything, but dates first since that's the common case. */
 const orderByOptions = computed(() =>
   [...columns.value]
@@ -234,77 +174,6 @@ const orderByOptions = computed(() =>
     })
     .map((c) => ({ label: c.name, value: c.name }))
 )
-
-function infoFor(name: string): ColumnInfo | undefined {
-  return columns.value.find((c) => c.name === name)
-}
-
-/** Unknown column (discovery hasn't run, or a typed name) falls back to the text operators. */
-function familyOf(name: string): ColumnFamily {
-  const info = infoFor(name)
-  return info ? columnFamily(info.dataType) : 'text'
-}
-
-function operatorOptionsFor(name: string): { label: string; value: ConditionOp }[] {
-  return operatorsFor(familyOf(name)).map((o) => ({ label: o.label, value: o.op }))
-}
-
-function valueKindFor(c: DraftCondition): ReturnType<typeof valueKindOf> {
-  return valueKindOf(c.op, familyOf(c.column))
-}
-
-/**
- * Whether to offer the include-empty checkbox: a negative operator on a column that can hold NULL.
- * On a NOT NULL column there is nothing to decide, so it's hidden rather than shown disabled.
- */
-function showsNullChoice(c: DraftCondition): boolean {
-  return isNegativeOp(c.op) && (infoFor(c.column)?.nullable ?? true)
-}
-
-/** Keep the operator legal when the column's type changes underneath it. */
-function onColumnChange(c: DraftCondition): void {
-  const allowed = operatorsFor(familyOf(c.column))
-  if (!allowed.some((o) => o.op === c.op)) c.op = allowed[0]?.op ?? 'eq'
-  resetPreview()
-}
-
-function addCondition(): void {
-  const draft = blankCondition()
-  const first = columnOptions.value[0]
-  if (first) {
-    draft.column = first.value
-    onColumnChange(draft)
-  }
-  model.conditions.push(draft)
-}
-
-function removeCondition(index: number): void {
-  model.conditions.splice(index, 1)
-}
-
-/**
- * Split a textarea into `in`/`notIn` values: one per line or comma-separated.
- *
- * Kept as the text typed, exactly as a scalar value is. Converting numeric-looking items changed
- * them: the text id `00123` became `123`, and `9007199254740993` rounded to `…992`. The database
- * compares a quoted number against a numeric column correctly, so nothing needs the conversion.
- */
-function parsedList(text: string): string[] {
-  return text
-    .split(/[\n,]/)
-    .map((v) => v.trim())
-    .filter((v) => v.length > 0)
-}
-
-function toCondition(c: DraftCondition): Condition {
-  const kind = valueKindFor(c)
-  const base: Condition = { column: c.column.trim() || null, op: c.op }
-  if (isNegativeOp(c.op)) base.includeNulls = c.includeNulls
-  if (kind === 'none') return base
-  if (kind === 'duration') return { ...base, value: { n: c.n ?? 0, unit: c.unit } }
-  if (kind === 'list') return { ...base, value: parsedList(c.listText) }
-  return { ...base, value: c.text }
-}
 
 /** Assemble the persisted rule — the filter the form is actually using, plus the chosen take. */
 function toInput(): Omit<SelectionRuleInput, 'workspaceId'> {
@@ -326,7 +195,7 @@ function toInput(): Omit<SelectionRuleInput, 'workspaceId'> {
     table: model.table.trim(),
     match: model.match,
     // One filter mechanism per rule — the repository enforces the same exclusivity on write.
-    where: model.useRaw ? [] : model.conditions.map(toCondition),
+    where: model.useRaw ? [] : model.conditions.map((c) => toCondition(c, columns.value)),
     rawWhere: model.useRaw ? model.rawWhere.trim() : undefined,
     take,
     anonymize: model.anonymize
@@ -411,19 +280,6 @@ const rules = computed<FormRules>(() => {
   return r
 })
 
-/** Compile-check every regex before saving, so a bad pattern fails here and not mid-extract. */
-function invalidRegex(): string | null {
-  for (const c of model.conditions) {
-    if (c.op !== 'matches') continue
-    try {
-      new RegExp(c.text)
-    } catch (err) {
-      return `Invalid regex for ${c.column || 'column'}: ${(err as Error).message}`
-    }
-  }
-  return null
-}
-
 async function submit(): Promise<void> {
   if (!workspace.currentWorkspaceId) {
     message.error('Select a workspace first.')
@@ -434,7 +290,7 @@ async function submit(): Promise<void> {
   } catch {
     return // inline errors shown
   }
-  const bad = invalidRegex()
+  const bad = invalidRegex(model.conditions)
   if (bad) {
     message.error(bad)
     return
@@ -492,97 +348,18 @@ async function submit(): Promise<void> {
 
       <!-- ── Filter ──────────────────────────────────────────────────────── -->
       <n-form-item v-if="!model.useRaw" label="Keep rows where">
-        <div class="filter">
-          <div class="filter__head">
-            <n-select
-              v-model:value="model.match"
-              class="filter__match"
-              size="small"
-              :options="matchOptions"
-              :disabled="model.conditions.length < 2"
-            />
-            <n-text depth="3" class="hint">
-              {{
-                model.conditions.length === 0
-                  ? 'No conditions — every row in the table qualifies.'
-                  : model.match === 'all'
-                    ? 'A row must satisfy every condition.'
-                    : 'A row need satisfy only one condition.'
-              }}
-            </n-text>
-          </div>
-
-          <div v-for="(c, i) in model.conditions" :key="i" class="cond">
-            <n-select
-              v-model:value="c.column"
-              class="cond__column"
-              size="small"
-              filterable
-              tag
-              placeholder="column"
-              :options="columnOptions"
-              @update:value="onColumnChange(c)"
-            />
-            <n-select
-              v-model:value="c.op"
-              class="cond__op"
-              size="small"
-              :options="operatorOptionsFor(c.column)"
-            />
-
-            <n-input
-              v-if="valueKindFor(c) === 'text'"
-              v-model:value="c.text"
-              class="cond__value"
-              size="small"
-              :placeholder="c.op === 'matches' ? 'JS regex' : 'value'"
-            />
-            <n-input
-              v-else-if="valueKindFor(c) === 'list'"
-              v-model:value="c.listText"
-              class="cond__value"
-              size="small"
-              type="textarea"
-              :autosize="{ minRows: 1, maxRows: 4 }"
-              placeholder="one per line, or comma-separated"
-            />
-            <div v-else-if="valueKindFor(c) === 'duration'" class="cond__value cond__duration">
-              <n-input-number
-                v-model:value="c.n"
-                size="small"
-                :min="1"
-                :show-button="false"
-                class="grow"
-              />
-              <n-select
-                v-model:value="c.unit"
-                size="small"
-                class="cond__unit"
-                :options="DURATION_UNITS"
-              />
-            </div>
-            <div v-else class="cond__value cond__value--empty" />
-
-            <n-checkbox
-              v-if="showsNullChoice(c)"
-              v-model:checked="c.includeNulls"
-              size="small"
-              class="cond__nulls"
-            >
-              include empty
-            </n-checkbox>
-            <span v-else class="cond__nulls" />
-
-            <n-button size="tiny" quaternary type="error" @click="removeCondition(i)">✕</n-button>
-          </div>
-
-          <div class="filter__actions">
-            <n-button size="small" @click="addCondition">+ Add condition</n-button>
+        <ConditionEditor
+          v-model:conditions="model.conditions"
+          v-model:match="model.match"
+          :columns="columns"
+          empty-hint="No conditions — every row in the table qualifies."
+        >
+          <template #actions>
             <n-button size="small" text type="primary" @click="model.useRaw = true">
               Use raw SQL instead
             </n-button>
-          </div>
-        </div>
+          </template>
+        </ConditionEditor>
       </n-form-item>
 
       <n-form-item v-else label="Keep rows where (SQL predicate)" path="rawWhere">
@@ -744,45 +521,6 @@ async function submit(): Promise<void> {
   flex-direction: column;
   gap: 8px;
   width: 100%;
-}
-
-.filter__head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.filter__match {
-  width: 130px;
-  flex: none;
-}
-
-.cond {
-  display: grid;
-  grid-template-columns: 1.1fr 1.1fr 1.4fr auto auto;
-  align-items: start;
-  gap: 8px;
-}
-
-.cond__duration {
-  display: flex;
-  gap: 6px;
-}
-
-.cond__unit {
-  width: 110px;
-  flex: none;
-}
-
-.cond__value--empty {
-  height: 0;
-}
-
-.cond__nulls {
-  display: inline-flex;
-  align-items: center;
-  min-width: 104px;
-  font-size: 12px;
 }
 
 .filter__actions {

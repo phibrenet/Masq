@@ -1,8 +1,11 @@
 import { randomUUID } from 'crypto'
-import { OBFUSCATE_MIN_COUNT } from '@shared/types'
+import { CONDITION_OPS, FAKE_GENERATORS, OBFUSCATE_MIN_COUNT } from '@shared/types'
 import type {
+  Condition,
+  ExceptionRule,
   FakeGenerator,
   FieldStrategy,
+  FieldStrategyException,
   FieldStrategyKind,
   FieldStrategyRule,
   TemplateBinding
@@ -28,6 +31,19 @@ interface FieldStrategyRow {
   template_json: string | null
   obfuscate_side: string | null
   obfuscate_count: number | null
+  obfuscate_delimiter: string | null
+  exception_json: string | null
+}
+
+/**
+ * Sentinel values the field-strategy form once saved as a binding's `generator` when the user chose
+ * "Redact" or "Remove" for a JSON path, instead of setting `action`. The engine treats an unknown
+ * generator as nothing to do, so those paths kept their real values. Read back as the action the
+ * user picked, so configs saved before the fix behave as they were meant to.
+ */
+const LEGACY_ACTION_SENTINELS: Record<string, 'redact' | 'remove'> = {
+  __redact__: 'redact',
+  __remove__: 'remove'
 }
 
 /**
@@ -42,9 +58,14 @@ function parseBindings(json: string | null): TemplateBinding[] {
   try {
     const parsed = JSON.parse(json)
     if (!Array.isArray(parsed)) return []
+    const repaired = parsed.map((b) =>
+      b && typeof b.generator === 'string' && b.generator in LEGACY_ACTION_SENTINELS
+        ? { path: b.path, action: LEGACY_ACTION_SENTINELS[b.generator] }
+        : b
+    )
     // A `redact`/`remove` binding carries no generator, so a generator is required only for `fake`
     // (which is also what an `action`-less legacy binding is).
-    return parsed.filter(
+    return repaired.filter(
       (b): b is TemplateBinding =>
         !!b &&
         typeof b.path === 'string' &&
@@ -64,6 +85,10 @@ function toRule(row: FieldStrategyRow): FieldStrategyRule {
     case 'jitter':
       return { kind: 'jitter', percent: row.jitter_percent ?? 0 }
     case 'obfuscate':
+      // A missing delimiter reads as '' — the engine then finds no delimiter and scrambles the whole
+      // value, which hides more, never less.
+      if (row.obfuscate_side === 'before')
+        return { kind: 'obfuscate', side: 'before', delimiter: row.obfuscate_delimiter ?? '' }
       return {
         kind: 'obfuscate',
         // Read leniently, like the template bindings above: a row that predates the columns, or one
@@ -81,13 +106,102 @@ function toRule(row: FieldStrategyRow): FieldStrategyRule {
   }
 }
 
+const OPS = new Set<string>(CONDITION_OPS)
+const GENERATOR_NAMES = new Set<string>(FAKE_GENERATORS)
+
+function isCondition(c: unknown): c is Condition {
+  if (!c || typeof c !== 'object') return false
+  const { column, op } = c as Record<string, unknown>
+  return (typeof column === 'string' || column === null) && OPS.has(op as string)
+}
+
+/** Rebuild an exception's rule from its JSON, or `undefined` when it isn't one this app can run. */
+function exceptionRuleFrom(value: unknown): ExceptionRule | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const r = value as Record<string, unknown>
+  switch (r.kind) {
+    case 'preserve':
+      return { kind: 'preserve' }
+    case 'redact':
+      return { kind: 'redact' }
+    case 'fake':
+      return GENERATOR_NAMES.has(r.generator as string)
+        ? { kind: 'fake', generator: r.generator as FakeGenerator }
+        : undefined
+    case 'jitter':
+      return typeof r.percent === 'number' ? { kind: 'jitter', percent: r.percent } : undefined
+    case 'obfuscate':
+      if (r.side === 'before')
+        return typeof r.delimiter === 'string'
+          ? { kind: 'obfuscate', side: 'before', delimiter: r.delimiter }
+          : undefined
+      if ((r.side === 'first' || r.side === 'last') && typeof r.count === 'number')
+        return {
+          kind: 'obfuscate',
+          side: r.side,
+          count: Math.max(OBFUSCATE_MIN_COUNT, Math.trunc(r.count))
+        }
+      return undefined
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Read `exception_json`. Anything it can't read is reported rather than dropped: dropping the
+ * exception would hand its rows to the main rule, which may be the weaker of the two.
+ */
+function parseException(json: string | null): {
+  exception?: FieldStrategyException
+  problem?: string
+} {
+  if (!json) return {}
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return { problem: 'its exception is not valid JSON' }
+  }
+  const conditions = parsed?.conditions
+  if (!Array.isArray(conditions) || conditions.length === 0 || !conditions.every(isCondition))
+    return { problem: "its exception's conditions could not be read" }
+  if (parsed.match !== 'all' && parsed.match !== 'any')
+    return { problem: "its exception's match mode could not be read" }
+  const rule = exceptionRuleFrom(parsed.rule)
+  if (!rule) return { problem: "its exception's rule could not be read" }
+  return { exception: { match: parsed.match, conditions, rule } }
+}
+
+/**
+ * The exception as stored, or NULL for none. One with no conditions is dropped rather than stored:
+ * it would match every row and quietly replace the main rule. The obfuscate floor is applied here
+ * for the same reason as on the main rule.
+ */
+function exceptionJson(exception: FieldStrategyException | null | undefined): string | null {
+  if (!exception || exception.conditions.length === 0) return null
+  const rule = exception.rule as FieldStrategyRule
+  if (rule.kind === 'template') throw new Error("An exception can't use a template strategy.")
+  const stored =
+    rule.kind === 'obfuscate' && rule.side !== 'before'
+      ? { ...rule, count: Math.max(OBFUSCATE_MIN_COUNT, Math.trunc(rule.count)) }
+      : rule
+  return JSON.stringify({
+    match: exception.match === 'any' ? 'any' : 'all',
+    conditions: exception.conditions,
+    rule: stored
+  })
+}
+
 function toFieldStrategy(row: FieldStrategyRow): FieldStrategy {
+  const { exception, problem } = parseException(row.exception_json)
   return {
     id: row.id,
     workspaceId: row.workspace_id,
     tableName: row.table_name,
     columnName: row.column_name,
-    rule: toRule(row)
+    rule: toRule(row),
+    ...(exception ? { exception } : {}),
+    ...(problem ? { invalid: problem } : {})
   }
 }
 
@@ -99,6 +213,7 @@ function toColumns(rule: FieldStrategyRule): {
   template_json: string | null
   obfuscate_side: string | null
   obfuscate_count: number | null
+  obfuscate_delimiter: string | null
 } {
   return {
     kind: rule.kind,
@@ -109,8 +224,13 @@ function toColumns(rule: FieldStrategyRule): {
     // form, an imported workspace file and any future caller all get the same answer — this is the
     // one path every write passes through. Rounded too: a fractional count would slice nothing
     // predictable.
+    // `before` stores a delimiter instead of a count; the minimum doesn't apply to it.
     obfuscate_count:
-      rule.kind === 'obfuscate' ? Math.max(OBFUSCATE_MIN_COUNT, Math.trunc(rule.count)) : null,
+      rule.kind === 'obfuscate' && rule.side !== 'before'
+        ? Math.max(OBFUSCATE_MIN_COUNT, Math.trunc(rule.count))
+        : null,
+    obfuscate_delimiter:
+      rule.kind === 'obfuscate' && rule.side === 'before' ? rule.delimiter : null,
     // Blank paths are dropped rather than stored: the builder UI shows a row per discovered path, and
     // an unbound one must not persist as a binding that resolves to nothing.
     template_json:
@@ -125,7 +245,13 @@ function toColumns(rule: FieldStrategyRule): {
   }
 }
 
-export type FieldStrategyInput = Omit<FieldStrategy, 'id'>
+/**
+ * Create/update payload. `invalid` is the store's own report, never accepted from a caller.
+ * `exception: null` clears it explicitly; on an update, leaving the key out keeps the current one.
+ */
+export type FieldStrategyInput = Omit<FieldStrategy, 'id' | 'invalid' | 'exception'> & {
+  exception?: FieldStrategyException | null
+}
 
 export function listFieldStrategiesByWorkspace(workspaceId: string): FieldStrategy[] {
   return (
@@ -150,15 +276,17 @@ export function createFieldStrategy(input: FieldStrategyInput): FieldStrategy {
     .prepare(
       `INSERT INTO field_strategies
          (id, workspace_id, table_name, column_name, kind, generator, jitter_percent, template_json,
-          obfuscate_side, obfuscate_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          obfuscate_side, obfuscate_count, obfuscate_delimiter, exception_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (workspace_id, table_name, column_name)
          DO UPDATE SET kind = excluded.kind,
                        generator = excluded.generator,
                        jitter_percent = excluded.jitter_percent,
                        template_json = excluded.template_json,
                        obfuscate_side = excluded.obfuscate_side,
-                       obfuscate_count = excluded.obfuscate_count`
+                       obfuscate_count = excluded.obfuscate_count,
+                       obfuscate_delimiter = excluded.obfuscate_delimiter,
+                       exception_json = excluded.exception_json`
     )
     .run(
       randomUUID(),
@@ -170,7 +298,9 @@ export function createFieldStrategy(input: FieldStrategyInput): FieldStrategy {
       cols.jitter_percent,
       cols.template_json,
       cols.obfuscate_side,
-      cols.obfuscate_count
+      cols.obfuscate_count,
+      cols.obfuscate_delimiter,
+      exceptionJson(input.exception)
     )
   const row = getDb()
     .prepare(
@@ -188,11 +318,15 @@ export function updateFieldStrategy(
   if (!existing) return undefined
   const next = { ...existing, ...patch }
   const cols = toColumns(next.rule)
+  // The exception is written only when the patch names it. Otherwise the stored JSON is left exactly
+  // as it is, so an edit that doesn't touch it can't silently drop one the store couldn't read.
+  const setsException = Object.hasOwn(patch, 'exception')
   getDb()
     .prepare(
       `UPDATE field_strategies
          SET table_name = ?, column_name = ?, kind = ?, generator = ?, jitter_percent = ?,
-             template_json = ?, obfuscate_side = ?, obfuscate_count = ?
+             template_json = ?, obfuscate_side = ?, obfuscate_count = ?, obfuscate_delimiter = ?
+             ${setsException ? ', exception_json = ?' : ''}
        WHERE id = ?`
     )
     .run(
@@ -204,6 +338,8 @@ export function updateFieldStrategy(
       cols.template_json,
       cols.obfuscate_side,
       cols.obfuscate_count,
+      cols.obfuscate_delimiter,
+      ...(setsException ? [exceptionJson(patch.exception)] : []),
       id
     )
   return getFieldStrategy(id)
