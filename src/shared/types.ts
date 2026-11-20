@@ -90,7 +90,7 @@ export interface WorkspaceTransfer {
     Partial<Pick<Workspace, 'dropExistingTables' | 'framework'>>
   tableClassifications: Omit<TableClassification, 'id' | 'workspaceId' | 'source'>[]
   selectionRules: Omit<SelectionRule, 'id' | 'workspaceId' | 'invalid'>[]
-  fieldStrategies: Omit<FieldStrategy, 'id' | 'workspaceId'>[]
+  fieldStrategies: Omit<FieldStrategy, 'id' | 'workspaceId' | 'invalid'>[]
   tableLocaleSources: Omit<TableLocaleSource, 'id' | 'workspaceId'>[]
   tableIdentitySources: Omit<TableIdentitySource, 'id' | 'workspaceId'>[]
   morphRelations: Omit<MorphRelation, 'id' | 'workspaceId'>[]
@@ -418,7 +418,16 @@ export interface SelectionRulePreview {
  *   firstName        → person.firstName()
  *   lastName         → person.lastName()          (surname)
  *   fullName         → person.fullName()
- *   email            → internet.email()
+ *   email            → internet.email()           (common provider domains — gmail.com etc.; can
+ *                      coincide with a real mailbox, so prefer `exampleEmail` if the copy sends mail)
+ *   exampleEmail     → internet.exampleEmail()    (example.com / .org / .net only — RFC 2606
+ *                      reserved domains, so nothing sent to it can reach a real person)
+ *   userIdEmail      → `user<id>@example.com`, not faker: `<id>` is the row's identity (its own
+ *                      primary key, or the entity it belongs to), so it never repeats and a person's
+ *                      address is the same in every table
+ *   userIdEmailKeepDomain → `user<id>@<the original value's domain>`, for an app that decides
+ *                      something from the domain (e.g. staff). The kept domain receives mail, so
+ *                      use it only for your own domains, typically in a strategy's exception
  *   phone            → phone.number()
  *   streetAddress    → location.streetAddress()   (line 1)
  *   secondaryAddress → location.secondaryAddress() (line 2 — apt/suite)
@@ -439,12 +448,16 @@ export interface SelectionRulePreview {
  *                      anonymize.ts; the default refDate is `now`, which is NOT seed-stable)
  *   avatarUrl        → image.avatar() (placeholder portrait/avatar image URL)
  *   url              → internet.url() (generic website URL, e.g. https://example.net/)
+ *   ipAddress        → internet.ipv4() (IPv4 only, so it fits a `varchar(15)` and a Postgres `inet`)
  */
 export const FAKE_GENERATORS = [
   'firstName',
   'lastName',
   'fullName',
   'email',
+  'exampleEmail',
+  'userIdEmail',
+  'userIdEmailKeepDomain',
   'phone',
   'streetAddress',
   'secondaryAddress',
@@ -462,14 +475,18 @@ export const FAKE_GENERATORS = [
   'loremParagraph',
   'dateOfBirth',
   'avatarUrl',
-  'url'
+  'url',
+  'ipAddress'
 ] as const
 export type FakeGenerator = (typeof FAKE_GENERATORS)[number]
 
 export type FieldStrategyKind = 'preserve' | 'redact' | 'fake' | 'jitter' | 'template' | 'obfuscate'
 
-/** Which end of the value `obfuscate` scrambles. */
-export type ObfuscateSide = 'first' | 'last'
+/**
+ * Which part of the value `obfuscate` scrambles: a run of `count` characters at either end, or
+ * everything before a delimiter (`before`).
+ */
+export type ObfuscateSide = 'first' | 'last' | 'before'
 
 /**
  * Fewest characters an `obfuscate` rule may scramble.
@@ -536,7 +553,35 @@ export type FieldStrategyRule =
    * `count` is at least `OBFUSCATE_MIN_COUNT`. A value shorter than `count` is scrambled entirely —
    * never less than asked for.
    */
-  | { kind: 'obfuscate'; side: ObfuscateSide; count: number }
+  | { kind: 'obfuscate'; side: 'first' | 'last'; count: number }
+  /**
+   * Scramble everything before the **last** `delimiter`, keeping the delimiter and what follows —
+   * `jane.doe@acme.com` before `@` keeps `@acme.com`. Last rather than first because it hides more
+   * when the delimiter repeats, and it is where an email's domain actually starts.
+   *
+   * A value that doesn't contain the delimiter is scrambled in full: the rule exists to hide the
+   * prefix, so a value it can't split must not pass through untouched. The `OBFUSCATE_MIN_COUNT`
+   * floor doesn't apply — the delimiter decides how much is hidden, so a short prefix hides little.
+   */
+  | { kind: 'obfuscate'; side: 'before'; delimiter: string }
+
+/** The kinds an exception may use. `template` has its own JSON path builder, so it stays main-only. */
+export type ExceptionRule = Exclude<FieldStrategyRule, { kind: 'template' }>
+
+/**
+ * A different rule for the rows of this column that match `conditions` — say `users.email` on
+ * `userIdEmail`, except rows whose email ends with `@acme.com`, which keep their domain because the
+ * app treats that domain as staff.
+ *
+ * Conditions use the selection-rule operators and are evaluated in Node against the row as read
+ * from the source, before any column is anonymized. An exception with no conditions is never
+ * stored: it would match every row and silently replace the main rule.
+ */
+export interface FieldStrategyException {
+  match: MatchMode
+  conditions: Condition[]
+  rule: ExceptionRule
+}
 
 export interface FieldStrategy {
   id: string
@@ -544,6 +589,13 @@ export interface FieldStrategy {
   tableName: string
   columnName: string
   rule: FieldStrategyRule
+  exception?: FieldStrategyException
+  /**
+   * Set when the stored exception couldn't be read back. Same contract as `SelectionRule.invalid`:
+   * dropping a damaged exception could widen what is kept (a `preserve` main rule whose exception
+   * faked customers), so the run refuses until the strategy is saved again.
+   */
+  invalid?: string
 }
 
 // ─── Dialect adapter layer (§4) ───────────────────────────────────────────────

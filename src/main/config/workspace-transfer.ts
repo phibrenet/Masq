@@ -53,6 +53,13 @@ export function exportWorkspaceConfig(workspaceId: string): WorkspaceTransfer {
     throw new Error(
       `Cannot export the damaged selection rule for "${badRule.table}": ${badRule.invalid}`
     )
+  const fieldStrategies = listFieldStrategiesByWorkspace(workspaceId)
+  const badStrategy = fieldStrategies.find((strategy) => strategy.invalid)
+  if (badStrategy)
+    throw new Error(
+      `Cannot export the damaged field strategy for ` +
+        `"${badStrategy.tableName}.${badStrategy.columnName}": ${badStrategy.invalid}`
+    )
 
   return {
     format: 'masq-workspace',
@@ -69,7 +76,11 @@ export function exportWorkspaceConfig(workspaceId: string): WorkspaceTransfer {
       delete fields.invalid
       return fields
     }),
-    fieldStrategies: strip(listFieldStrategiesByWorkspace(workspaceId)),
+    fieldStrategies: strip(fieldStrategies).map((strategy) => {
+      const fields = { ...strategy }
+      delete fields.invalid
+      return fields
+    }),
     tableLocaleSources: strip(listTableLocaleSourcesByWorkspace(workspaceId)),
     tableIdentitySources: strip(listTableIdentitySourcesByWorkspace(workspaceId)),
     morphRelations: strip(listMorphRelationsByWorkspace(workspaceId)),
@@ -186,39 +197,39 @@ function rule(value: unknown, label: string): void {
   }
 }
 
-function field(value: unknown, label: string): void {
-  const f = object(value, label, ['tableName', 'columnName', 'rule'])
-  string(f.tableName, `${label}.tableName`)
-  string(f.columnName, `${label}.columnName`)
+const STRATEGY_KINDS = ['preserve', 'redact', 'fake', 'jitter', 'template', 'obfuscate'] as const
+const EXCEPTION_KINDS = STRATEGY_KINDS.filter((kind) => kind !== 'template')
+
+/** One strategy rule — a column's main rule, or its exception's (which can't be a template). */
+function strategyRule(value: unknown, label: string, kinds: readonly string[]): void {
   const r = object(
-    f.rule,
-    `${label}.rule`,
+    value,
+    label,
     ['kind'],
-    ['generator', 'percent', 'bindings', 'side', 'count']
+    ['generator', 'percent', 'bindings', 'side', 'count', 'delimiter']
   )
-  choice(r.kind, `${label}.rule.kind`, [
-    'preserve',
-    'redact',
-    'fake',
-    'jitter',
-    'template',
-    'obfuscate'
-  ])
-  if (r.kind === 'fake') choice(r.generator, `${label}.rule.generator`, FAKE_GENERATORS)
-  if (r.kind === 'jitter') number(r.percent, `${label}.rule.percent`)
-  if (r.kind === 'obfuscate') {
-    choice(r.side, `${label}.rule.side`, ['first', 'last'])
-    number(r.count, `${label}.rule.count`, true)
+  choice(r.kind, `${label}.kind`, kinds)
+  if (r.kind === 'fake') choice(r.generator, `${label}.generator`, FAKE_GENERATORS)
+  if (r.kind === 'jitter') number(r.percent, `${label}.percent`)
+  if (r.kind === 'obfuscate' && r.side === 'before') {
+    // Not `string()`: that trims, and a space is a legitimate delimiter.
+    if (typeof r.delimiter !== 'string' || r.delimiter.length === 0)
+      throw new Error(`${label}.delimiter must be a non-empty string.`)
+    if ('count' in r) throw new Error(`${label}.count is not used by obfuscate before.`)
+  } else if (r.kind === 'obfuscate') {
+    choice(r.side, `${label}.side`, ['first', 'last'])
+    if ('delimiter' in r) throw new Error(`${label}.delimiter is only used by obfuscate before.`)
+    number(r.count, `${label}.count`, true)
     // Rejected rather than quietly raised to the floor: a shared file asking to hide 3 characters
     // was written by someone who believed 3 was enough, and importing it as 6 would hide that.
     if ((r.count as number) < OBFUSCATE_MIN_COUNT)
       throw new Error(
-        `${label}.rule.count must be at least ${OBFUSCATE_MIN_COUNT} — ` +
+        `${label}.count must be at least ${OBFUSCATE_MIN_COUNT} — ` +
           `scrambling fewer characters leaves the value re-identifiable.`
       )
   }
   if (r.kind === 'template')
-    list(r.bindings, `${label}.rule.bindings`, (value, at) => {
+    list(r.bindings, `${label}.bindings`, (value, at) => {
       const b = object(value, at, ['path'], ['action', 'generator'])
       string(b.path, `${at}.path`)
       if (b.action !== undefined) choice(b.action, `${at}.action`, ['fake', 'redact', 'remove'])
@@ -227,14 +238,29 @@ function field(value: unknown, label: string): void {
       else if (b.generator !== undefined) choice(b.generator, `${at}.generator`, FAKE_GENERATORS)
     })
   if (r.kind !== 'fake' && 'generator' in r)
-    throw new Error(`${label}.rule.generator is not used by ${r.kind}.`)
+    throw new Error(`${label}.generator is not used by ${r.kind}.`)
   if (r.kind !== 'jitter' && 'percent' in r)
-    throw new Error(`${label}.rule.percent is not used by ${r.kind}.`)
+    throw new Error(`${label}.percent is not used by ${r.kind}.`)
   if (r.kind !== 'template' && 'bindings' in r)
-    throw new Error(`${label}.rule.bindings is not used by ${r.kind}.`)
-  for (const key of ['side', 'count'])
+    throw new Error(`${label}.bindings is not used by ${r.kind}.`)
+  for (const key of ['side', 'count', 'delimiter'])
     if (r.kind !== 'obfuscate' && key in r)
-      throw new Error(`${label}.rule.${key} is not used by ${r.kind}.`)
+      throw new Error(`${label}.${key} is not used by ${r.kind}.`)
+}
+
+function field(value: unknown, label: string): void {
+  const f = object(value, label, ['tableName', 'columnName', 'rule'], ['exception'])
+  string(f.tableName, `${label}.tableName`)
+  string(f.columnName, `${label}.columnName`)
+  strategyRule(f.rule, `${label}.rule`, STRATEGY_KINDS)
+  if (f.exception === undefined) return
+  const e = object(f.exception, `${label}.exception`, ['match', 'conditions', 'rule'])
+  choice(e.match, `${label}.exception.match`, ['all', 'any'])
+  list(e.conditions, `${label}.exception.conditions`, condition)
+  // An exception with no conditions would match every row and replace the main rule outright.
+  if ((e.conditions as unknown[]).length === 0)
+    throw new Error(`${label}.exception.conditions must not be empty.`)
+  strategyRule(e.rule, `${label}.exception.rule`, EXCEPTION_KINDS)
 }
 
 /** Reject malformed configuration rather than letting repository read fallbacks widen a rule. */

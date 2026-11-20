@@ -2,7 +2,12 @@
 import { computed, ref, watch } from 'vue'
 import { NButton, NInput, NPopover, NSelect, NTooltip, useDialog, useMessage } from 'naive-ui'
 import type { FieldStrategy, FieldStrategyKind } from '@shared/types'
-import { strategyExample, strategyLabel, templateMapping } from '@renderer/lib/strategyDisplay'
+import {
+  exceptionSummary,
+  strategyExample,
+  strategyLabel,
+  templateMapping
+} from '@renderer/lib/strategyDisplay'
 import type { SuspectedColumn } from '@renderer/lib/pii'
 import { useFieldStrategiesStore } from '@renderer/stores/fieldStrategies'
 import { useLocaleSourcesStore } from '@renderer/stores/localeSources'
@@ -410,6 +415,16 @@ function retryLoad(): void {
             <UiBadge v-else :tone="FAMILY_TONE[strategy.rule.kind]">
               {{ strategyLabel(strategy.rule) }}
             </UiBadge>
+            <span
+              v-if="strategy.exception"
+              class="srow__exception"
+              :title="exceptionSummary(strategy.exception)"
+            >
+              except {{ exceptionSummary(strategy.exception) }}
+            </span>
+            <span v-if="strategy.invalid" class="srow__invalid">
+              Exception unreadable — runs are refused until it's saved again.
+            </span>
           </span>
           <span
             class="mono srow__preview"
@@ -560,6 +575,24 @@ function retryLoad(): void {
 
 .srow__rule {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.srow__exception,
+.srow__invalid {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: rgb(var(--fg-muted));
+}
+
+.srow__invalid {
+  color: rgb(var(--warn));
 }
 
 .srow__preview {
