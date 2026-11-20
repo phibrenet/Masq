@@ -9,6 +9,96 @@ Entries below marked _(from spec v1)_ were established in the initial technical 
 
 ---
 
+## 2026-11-04 — Field-strategy exceptions, and ID-keyed email generators
+
+**Why.** A consumer of the dumps asked for staff to be masked like every other user, and for every
+email to be undeliverable. But the app treats the staff email domain as the staff check, so staff
+emails must keep their domain while customer emails must not. One rule per column can't say that.
+
+**Exception.** A field strategy may carry one exception: `{ match, conditions, rule }`. Rows matching
+the conditions get the exception's rule; every other row gets the main rule.
+
+- _Conditions are the selection-rule `Condition`s_, checked in Node by the existing
+  `evaluateConditions`. They test the row **as read from the source**, before any column is
+  anonymized, so an exception on `name` can ask about the real `email`.
+- _Not cohorts_ (docs/selection-rules-v2.md). Staff reach the dump through backfill, not through a
+  selection rule, so a label set by a selection rule wouldn't reach them. A condition on the row's
+  own values does, and needs no cascade propagation.
+- _One exception, not a list._ That covers the case that came up. A list would make precedence a
+  question, and the stored JSON could become a list later.
+- _Not a template._ A template has its own path builder. The exception may use any other kind,
+  including `preserve`; the form warns that preserve keeps the real value.
+- _Fails closed._ An exception with no conditions would match every row and silently replace the
+  main rule, so it is never stored (repository), is rejected on import, and is ignored by the
+  engine. An exception that can't be read back sets `invalid` and the run refuses, as with selection
+  rules. Dropping it could widen what's kept if the main rule is the weaker one. An exception that
+  tests a column the table doesn't have fails the run before any file is written. It would
+  otherwise never match.
+- Stored as `exception_json` (migration 018). An update writes it only when the patch names it, and
+  `null` clears it. A rename can't drop a damaged exception the store couldn't read.
+
+**`userIdEmail` / `userIdEmailKeepDomain` generators.** `user<id>@example.com`, or
+`user<id>@<original domain>`. `<id>` comes from the identity key, not the row, so a person's
+address matches in every table, like every `fake` value. They never repeat. On a UNIQUE collision
+(two identities from different tables sharing an id) they get a `-n` suffix, because a value built
+from the id would repeat on every salted attempt. Generators now receive `{ value, identityKey,
+attempt }` besides faker. The keep-domain variant keeps a real, deliverable domain, so it is meant
+for your own domains inside an exception, never as a column's main rule.
+
+**Shared editors.** The condition editor moved out of the selection-rule form into
+`ConditionEditor.vue` (plus `lib/conditionDraft.ts`). The non-template rule settings moved into
+`RuleOptionFields.vue` (plus `lib/ruleDraft.ts`). Selection rules, a strategy's main rule and its
+exception all use them, so they can't drift apart. The selection-rule form's behaviour is
+unchanged.
+
+## 2026-11-04 — `exampleEmail` + `ipAddress` generators, obfuscate `before`, and NULL stays NULL
+
+Four changes to field anonymization, all asked for together except the last.
+
+**`exampleEmail` generator** (`faker.internet.exampleEmail()`). Only `example.com`, `example.org`
+or `example.net` (RFC 2606 reserved), so a dev copy that sends mail can't reach a real person. Added
+beside `email` rather than replacing it. Changing `email` would change every existing dump's
+values, and some users may want realistic provider domains. The form labels the two "example.com /
+.org / .net" and "real provider domains", so the choice is visible. Faker's own docs warn that
+`email()` can produce a real address. The UI example for `email` used to show `@example.net`, which
+was misleading, so it now shows a provider domain.
+
+**`ipAddress` generator** (`faker.internet.ipv4()`). IPv4 only. It fits a `varchar(15)` and a
+Postgres `inet`, while an IPv6 value can overflow a legacy column. Addresses are random, not limited
+to the documentation ranges: those only hold 768 addresses, too few for a UNIQUE column. Seeded on
+the identity key like every other generator.
+
+**Obfuscate `before`.** A third `obfuscate` side scrambles everything before the **last**
+occurrence of a delimiter and keeps the rest (`jane.doe@acme.com` → `qzkd.lmx@acme.com`). It extends
+`obfuscate` rather than adding a kind: it is the same class-preserving, value-seeded scramble, only
+the run is chosen differently. A new kind would also have needed a 12-step table rebuild for the
+`kind` CHECK. Migration 017 adds `obfuscate_delimiter`. A `before` rule stores the delimiter and a
+NULL count; first/last store the count and a NULL delimiter.
+
+- _Last occurrence_: it hides more when the delimiter repeats, and it is where an email's domain
+  starts.
+- _No delimiter in the value → scramble the whole value_. Passing it through untouched would let a
+  value skip the rule. An empty or missing delimiter is read the same way.
+- _No `OBFUSCATE_MIN_COUNT` floor_. The delimiter decides how much is hidden, so `jo@acme.com` hides
+  two letters. That's inherent to keeping the suffix; THREAT_MODEL §3.5 says so.
+- Import rejects a `before` rule without a non-empty delimiter, or with a `count`, and a first/last
+  rule with a `delimiter`. A space is a valid delimiter, so it isn't trimmed.
+
+**NULL stays NULL.** `fake` used to generate a value for a NULL column, and a template's `fake`
+binding did the same for a `null` leaf. Both now leave the NULL. Filling it invents data the source
+never had (a user with no phone gains one) and skews anything that counts or filters on presence,
+while hiding nothing. `redact`, `obfuscate` and `jitter` already left NULLs alone. An empty string is
+still replaced, because it is a present value. A NULL on a UNIQUE column doesn't use up a unique
+value.
+
+**Fix found on the way: template Redact/Remove leaked.** The form saved a JSON path set to "Redact"
+or "Remove" as `{ generator: '__redact__' }` instead of `{ action: 'redact' }`. The engine skips an
+unknown generator, so the real value went into the dump. Reopening the form still showed "Redact",
+so nothing looked wrong. The mapping now lives in `lib/templateBindings.ts` with tests. The
+repository's `parseBindings` reads the old sentinels back as actions, so existing configs take
+effect on the next run without being re-saved, and their exports become importable. Dumps produced
+before this fix may contain those values.
+
 ## 2026-10-30 — MySQL TIMESTAMPs are read and dumped in UTC (`time_zone = '+00:00'` on both sides)
 
 Reported from an import: a DBeaver restore on a Mac in Europe/London failed with `Incorrect

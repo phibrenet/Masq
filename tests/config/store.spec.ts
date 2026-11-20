@@ -32,6 +32,8 @@ import {
   listFieldStrategiesByWorkspace,
   updateFieldStrategy
 } from '../../src/main/config/repositories/field-strategies'
+import type { FieldStrategyInput } from '../../src/main/config/repositories/field-strategies'
+import type { FieldStrategy, FieldStrategyException } from '@shared/types'
 import {
   applyFrameworkPresets,
   listTableClassificationsByWorkspace,
@@ -51,7 +53,7 @@ const userData = mkdtempSync(join(tmpdir(), 'masq-store-spec-'))
 const previousUserData = process.env.MASQ_TEST_USERDATA
 process.env.MASQ_TEST_USERDATA = userData
 
-const MIGRATION_COUNT = 16
+const MIGRATION_COUNT = 18
 
 beforeAll(() => {
   runMigrations()
@@ -375,6 +377,59 @@ describe('obfuscate field strategy', () => {
       .get(created.id) as { obfuscate_side: string | null; obfuscate_count: number | null }
     expect(row).toEqual({ obfuscate_side: null, obfuscate_count: null })
   })
+
+  it('round-trips a before-delimiter rule, storing the delimiter instead of a count', () => {
+    const ws = createWorkspace({ name: 'Obfuscate before' })
+
+    const created = createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'obfuscate', side: 'before', delimiter: '@' }
+    })
+
+    expect(created.rule).toEqual({ kind: 'obfuscate', side: 'before', delimiter: '@' })
+    expect(getFieldStrategy(created.id)!.rule).toEqual(created.rule)
+    const stored = (): unknown =>
+      getDb()
+        .prepare(
+          'SELECT obfuscate_side, obfuscate_count, obfuscate_delimiter FROM field_strategies WHERE id = ?'
+        )
+        .get(created.id)
+    expect(stored()).toEqual({
+      obfuscate_side: 'before',
+      obfuscate_count: null,
+      obfuscate_delimiter: '@'
+    })
+
+    // Switching to a counted side clears the delimiter, so it can't resurface later.
+    updateFieldStrategy(created.id, { rule: { kind: 'obfuscate', side: 'last', count: 6 } })
+    expect(stored()).toEqual({
+      obfuscate_side: 'last',
+      obfuscate_count: 6,
+      obfuscate_delimiter: null
+    })
+  })
+
+  it('reads a before rule with a missing delimiter as one that scrambles the whole value', () => {
+    // A hand-edited or damaged row must fall back to hiding more, never to an unreadable rule.
+    const ws = createWorkspace({ name: 'Obfuscate before damaged' })
+    const created = createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'obfuscate', side: 'before', delimiter: '@' }
+    })
+    getDb()
+      .prepare('UPDATE field_strategies SET obfuscate_delimiter = NULL WHERE id = ?')
+      .run(created.id)
+
+    expect(getFieldStrategy(created.id)!.rule).toEqual({
+      kind: 'obfuscate',
+      side: 'before',
+      delimiter: ''
+    })
+  })
 })
 
 describe('workspace transfer', () => {
@@ -399,6 +454,166 @@ describe('workspace transfer', () => {
     file.fieldStrategies[0].rule.count = 7
     file.fieldStrategies[0].rule.side = 'middle'
     expect(() => parseWorkspaceTransfer(file)).toThrow(/side/i)
+  })
+
+  it('carries an obfuscate-before rule and rejects one without a usable delimiter', () => {
+    const ws = createWorkspace({ name: 'Obfuscate before transfer' })
+    createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'obfuscate', side: 'before', delimiter: '@' }
+    })
+    const file = JSON.parse(JSON.stringify(exportWorkspaceConfig(ws.id)))
+    const rule = file.fieldStrategies[0].rule
+
+    expect(rule).toEqual({ kind: 'obfuscate', side: 'before', delimiter: '@' })
+    expect(() => parseWorkspaceTransfer(file)).not.toThrow()
+
+    // A space is a real delimiter, so it isn't trimmed away.
+    rule.delimiter = ' '
+    expect(() => parseWorkspaceTransfer(file)).not.toThrow()
+
+    rule.delimiter = ''
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/delimiter/i)
+    delete rule.delimiter
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/delimiter/i)
+
+    rule.delimiter = '@'
+    rule.count = 6
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/count/i)
+
+    // And a counted side doesn't accept a delimiter.
+    rule.side = 'last'
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/delimiter/i)
+  })
+
+  it('round-trips every new field-strategy feature through export and import', () => {
+    // One workspace using each addition: the four new generators, obfuscate before, template
+    // redact/remove, and an exception. Whatever is exported must import unchanged.
+    const ws = createWorkspace({ name: 'Strategy features' })
+    const strategies = [
+      {
+        tableName: 'users',
+        columnName: 'email',
+        rule: { kind: 'fake', generator: 'userIdEmail' },
+        exception: {
+          match: 'any',
+          conditions: [
+            { column: 'email', op: 'endsWith', value: '@acme.com' },
+            { column: 'role', op: 'in', value: ['admin', 'staff'] }
+          ],
+          rule: { kind: 'fake', generator: 'userIdEmailKeepDomain' }
+        }
+      },
+      {
+        tableName: 'users',
+        columnName: 'contact',
+        rule: { kind: 'fake', generator: 'exampleEmail' }
+      },
+      {
+        tableName: 'audits',
+        columnName: 'ip_address',
+        rule: { kind: 'fake', generator: 'ipAddress' }
+      },
+      {
+        tableName: 'users',
+        columnName: 'reference',
+        rule: { kind: 'obfuscate', side: 'before', delimiter: '-' },
+        exception: {
+          match: 'all',
+          conditions: [{ column: 'reference', op: 'startsWith', value: 'TEST' }],
+          rule: { kind: 'obfuscate', side: 'last', count: 8 }
+        }
+      },
+      {
+        tableName: 'audits',
+        columnName: 'new_values',
+        rule: {
+          kind: 'template',
+          bindings: [
+            { path: 'password', action: 'remove' },
+            { path: 'token', action: 'redact' },
+            { path: 'email', generator: 'userIdEmail' }
+          ]
+        }
+      }
+    ] as const
+    for (const strategy of strategies)
+      createFieldStrategy({
+        ...(strategy as unknown as Omit<FieldStrategyInput, 'workspaceId'>),
+        workspaceId: ws.id
+      })
+
+    const file = JSON.parse(JSON.stringify(exportWorkspaceConfig(ws.id)))
+    expect(() => parseWorkspaceTransfer(file)).not.toThrow()
+    const imported = importWorkspaceConfig(file, 'Strategy features copy')
+    const strip = (list: FieldStrategy[]): unknown[] =>
+      list.map(({ tableName, columnName, rule, exception }) => ({
+        tableName,
+        columnName,
+        rule,
+        ...(exception ? { exception } : {})
+      }))
+
+    expect(strip(listFieldStrategiesByWorkspace(imported.id))).toEqual(
+      strip(listFieldStrategiesByWorkspace(ws.id))
+    )
+    expect(strip(listFieldStrategiesByWorkspace(imported.id))).toHaveLength(strategies.length)
+  })
+
+  it('rejects an exception that would match every row, use a template, or hold a bad condition', () => {
+    const ws = createWorkspace({ name: 'Exception transfer checks' })
+    createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'fake', generator: 'userIdEmail' },
+      exception: {
+        match: 'all',
+        conditions: [{ column: 'email', op: 'endsWith', value: '@acme.com' }],
+        rule: { kind: 'fake', generator: 'userIdEmailKeepDomain' }
+      }
+    })
+    const exported = JSON.stringify(exportWorkspaceConfig(ws.id))
+    const fresh = (): { fieldStrategies: { exception: Record<string, unknown> }[] } =>
+      JSON.parse(exported)
+
+    let file = fresh()
+    file.fieldStrategies[0].exception.conditions = []
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/conditions must not be empty/)
+
+    file = fresh()
+    file.fieldStrategies[0].exception.rule = { kind: 'template', bindings: [] }
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/exception\.rule\.kind/)
+
+    file = fresh()
+    file.fieldStrategies[0].exception.conditions = [{ column: 'email', op: 'like', value: 'x' }]
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/op/)
+
+    file = fresh()
+    file.fieldStrategies[0].exception.rule = { kind: 'obfuscate', side: 'last', count: 3 }
+    expect(() => parseWorkspaceTransfer(file)).toThrow(/at least 6/)
+  })
+
+  it('refuses to export a strategy whose exception could not be read back', () => {
+    const ws = createWorkspace({ name: 'Damaged exception export' })
+    const created = createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'fake', generator: 'userIdEmail' },
+      exception: {
+        match: 'all',
+        conditions: [{ column: 'email', op: 'endsWith', value: '@acme.com' }],
+        rule: { kind: 'redact' }
+      }
+    })
+    getDb()
+      .prepare('UPDATE field_strategies SET exception_json = ? WHERE id = ?')
+      .run('{"match":"all","conditions":[],"rule":{"kind":"redact"}}', created.id)
+
+    expect(() => exportWorkspaceConfig(ws.id)).toThrow(/damaged field strategy/)
   })
 
   it('round-trips every portable setting with fresh IDs and no local or secret data', () => {
@@ -949,6 +1164,41 @@ describe('field-strategy CRUD', () => {
     expect(read.rule.bindings.map((b) => b.path)).toEqual(['password', 'ip', 'address1'])
   })
 
+  it('reads redact/remove bindings saved as generator sentinels as the actions they meant', () => {
+    // The form used to store a "Redact" or "Remove" choice as `generator: '__redact__'`. The engine
+    // skips an unknown generator, so those paths kept their real values in the dump.
+    const ws = createWorkspace({ name: 'Template sentinels' })
+    const strategy = createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'audits',
+      columnName: 'new_values',
+      rule: { kind: 'template', bindings: [{ path: 'password', action: 'remove' }] }
+    })
+    getDb()
+      .prepare('UPDATE field_strategies SET template_json = ? WHERE id = ?')
+      .run(
+        JSON.stringify([
+          { path: 'password', generator: '__remove__' },
+          { path: 'ip', generator: '__redact__' },
+          { path: 'name', generator: 'fullName' }
+        ]),
+        strategy.id
+      )
+
+    expect(getFieldStrategy(strategy.id)!.rule).toEqual({
+      kind: 'template',
+      bindings: [
+        { path: 'password', action: 'remove' },
+        { path: 'ip', action: 'redact' },
+        { path: 'name', generator: 'fullName' }
+      ]
+    })
+    // Repaired on read, so an export of the old config is importable rather than rejected.
+    expect(() =>
+      parseWorkspaceTransfer(JSON.parse(JSON.stringify(exportWorkspaceConfig(ws.id))))
+    ).not.toThrow()
+  })
+
   it('updates by id and deletes cleanly', () => {
     const ws = createWorkspace({ name: 'Strategy Edit' })
 
@@ -970,5 +1220,103 @@ describe('field-strategy CRUD', () => {
     deleteFieldStrategy(strategy.id)
     expect(getFieldStrategy(strategy.id)).toBeUndefined()
     expect(listFieldStrategiesByWorkspace(ws.id)).toHaveLength(0)
+  })
+})
+
+describe('field-strategy exceptions', () => {
+  const staff = {
+    match: 'all',
+    conditions: [{ column: 'email', op: 'endsWith', value: '@acme.com' }],
+    rule: { kind: 'fake', generator: 'userIdEmailKeepDomain' }
+  } as const satisfies FieldStrategyException
+
+  function withStaffException(name: string): FieldStrategy {
+    const ws = createWorkspace({ name })
+    return createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'fake', generator: 'userIdEmail' },
+      exception: staff
+    })
+  }
+
+  it('round-trips an exception alongside the main rule', () => {
+    const created = withStaffException('Exception round trip')
+    expect(created.exception).toEqual(staff)
+    expect(getFieldStrategy(created.id)!.exception).toEqual(staff)
+    expect(created.invalid).toBeUndefined()
+  })
+
+  it('keeps the exception on an update that leaves it out, and clears it on null', () => {
+    const created = withStaffException('Exception update')
+
+    const renamed = updateFieldStrategy(created.id, { columnName: 'work_email' })!
+    expect(renamed.exception).toEqual(staff)
+
+    const cleared = updateFieldStrategy(created.id, { exception: null })!
+    expect(cleared.exception).toBeUndefined()
+  })
+
+  it('does not store an exception with no conditions, which would match every row', () => {
+    const ws = createWorkspace({ name: 'Empty exception' })
+    const created = createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'email',
+      rule: { kind: 'fake', generator: 'userIdEmail' },
+      exception: { ...staff, conditions: [] }
+    })
+    expect(created.exception).toBeUndefined()
+  })
+
+  it('raises an exception obfuscate count to the minimum, like the main rule', () => {
+    const ws = createWorkspace({ name: 'Exception floor' })
+    const created = createFieldStrategy({
+      workspaceId: ws.id,
+      tableName: 'users',
+      columnName: 'reference',
+      rule: { kind: 'redact' },
+      exception: { ...staff, rule: { kind: 'obfuscate', side: 'last', count: 2 } }
+    })
+    expect(created.exception!.rule).toEqual({ kind: 'obfuscate', side: 'last', count: 6 })
+  })
+
+  it('refuses a template exception', () => {
+    const ws = createWorkspace({ name: 'Template exception' })
+    expect(() =>
+      createFieldStrategy({
+        workspaceId: ws.id,
+        tableName: 'users',
+        columnName: 'meta',
+        rule: { kind: 'redact' },
+        exception: {
+          ...staff,
+          rule: { kind: 'template', bindings: [] } as unknown as FieldStrategyException['rule']
+        }
+      })
+    ).toThrow(/template/)
+  })
+
+  it('flags an exception it cannot read instead of dropping it, and keeps it until saved', () => {
+    // Dropping it would hand the exception's rows to the main rule, which may be the weaker one.
+    const created = withStaffException('Exception damaged')
+    const damaged = '{"match":"all","conditions":[{"column":"email","op":"like"}],"rule":{}}'
+    getDb()
+      .prepare('UPDATE field_strategies SET exception_json = ? WHERE id = ?')
+      .run(damaged, created.id)
+
+    const read = getFieldStrategy(created.id)!
+    expect(read.invalid).toMatch(/conditions could not be read/)
+    expect(read.exception).toBeUndefined()
+
+    // An edit that doesn't name the exception leaves the damaged JSON alone...
+    updateFieldStrategy(created.id, { columnName: 'email2' })
+    expect(getFieldStrategy(created.id)!.invalid).toBeDefined()
+
+    // ...and saving one replaces it, which clears the flag.
+    const saved = updateFieldStrategy(created.id, { exception: staff })!
+    expect(saved.invalid).toBeUndefined()
+    expect(saved.exception).toEqual(staff)
   })
 })

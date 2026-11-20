@@ -2,11 +2,12 @@ import { createHash } from 'crypto'
 import type { Faker } from '@faker-js/faker'
 import type {
   FakeGenerator,
+  FieldStrategyException,
   FieldStrategyRule,
-  ObfuscateSide,
   Row,
   TemplateBinding
 } from '@shared/types'
+import { evaluateConditions } from './conditions'
 
 /**
  * Field-level anonymization (spec §8). `anonymizeRow` transforms a row that selection/cascade
@@ -23,9 +24,25 @@ import type {
  * across re-runs — independent of column name or field order. `jitter` seeds on `rowKey:column`,
  * so a given row's perturbation is reproducible. `obfuscate` seeds on `column:value`, so the *same*
  * input always scrambles to the same output — see `obfuscate`.
+ *
+ * **NULL stays NULL.** No strategy turns a missing value into a present one: a user with no phone
+ * keeps no phone. Filling nulls would invent data the source never had, skew anything that counts
+ * or filters on presence, and hide no one. `redact` already writes NULL, and `obfuscate`/`jitter`
+ * leave a NULL alone, so the rule bites on `fake` and on the `fake` bindings of a `template`.
  */
 
-type GeneratorFn = (f: Faker) => unknown
+/**
+ * What a generator may read besides faker. Most ignore it. The ID-keyed emails need the identity and,
+ * to keep a domain, the original value. `attempt` counts collisions on a UNIQUE column: a faker
+ * generator gets a fresh seed per attempt instead, but a value built from the identity would repeat.
+ */
+interface GeneratorInput {
+  value: unknown
+  identityKey: string
+  attempt: number
+}
+
+type GeneratorFn = (f: Faker, input: GeneratorInput) => unknown
 
 /**
  * Fixed reference date for `dateOfBirth`. `faker.date.birthdate()` defaults its `refDate` to **now**,
@@ -42,11 +59,36 @@ function birthdate(f: Faker): string {
   return d.toISOString().slice(0, 10)
 }
 
+/**
+ * The local part of an ID-keyed email: `user` + the identity's id, so `users:1234` → `user1234`.
+ *
+ * The id is the part after the table prefix (`ownIdentity` writes `table:id`). Anything an email
+ * local part can't safely carry, such as the separators of a composite key, becomes `-`. A UNIQUE
+ * collision, possible only when two identities from different tables share an id, gets a suffix.
+ */
+function idLocalPart(identityKey: string, attempt: number): string {
+  const id = identityKey.slice(identityKey.indexOf(':') + 1) || identityKey
+  const safe = id.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 48)
+  return `user${safe}${attempt > 0 ? `-${attempt}` : ''}`
+}
+
+/** The domain of an email-ish value, or `example.com` when it hasn't one. */
+function domainOf(value: unknown): string {
+  const text = typeof value === 'string' ? value.trim() : ''
+  const at = text.lastIndexOf('@')
+  const domain = at === -1 ? '' : text.slice(at + 1)
+  return /^[A-Za-z0-9.-]+$/.test(domain) ? domain : 'example.com'
+}
+
 const GENERATORS: Record<FakeGenerator, GeneratorFn> = {
   firstName: (f) => f.person.firstName(),
   lastName: (f) => f.person.lastName(),
   fullName: (f) => f.person.fullName(),
   email: (f) => f.internet.email(),
+  exampleEmail: (f) => f.internet.exampleEmail(),
+  userIdEmail: (_f, { identityKey, attempt }) => `${idLocalPart(identityKey, attempt)}@example.com`,
+  userIdEmailKeepDomain: (_f, { value, identityKey, attempt }) =>
+    `${idLocalPart(identityKey, attempt)}@${domainOf(value)}`,
   phone: (f) => f.phone.number(),
   streetAddress: (f) => f.location.streetAddress(),
   secondaryAddress: (f) => f.location.secondaryAddress(),
@@ -64,7 +106,8 @@ const GENERATORS: Record<FakeGenerator, GeneratorFn> = {
   loremParagraph: (f) => f.lorem.paragraph(),
   dateOfBirth: birthdate,
   avatarUrl: (f) => f.image.avatar(),
-  url: (f) => f.internet.url()
+  url: (f) => f.internet.url(),
+  ipAddress: (f) => f.internet.ipv4()
 }
 
 /** Deterministic 48-bit seed from a stable string key (SHA-256 → first 6 bytes). */
@@ -75,6 +118,12 @@ function seedInt(key: string): number {
 export interface AnonymizeContext {
   /** column → strategy for this table (columns absent from the map are preserved). */
   strategies: Map<string, FieldStrategyRule>
+  /** column → the exception to its strategy, for the columns that have one. */
+  exceptions?: Map<string, FieldStrategyException>
+  /** The table's primary key, for a condition whose column is the PK sentinel (`null`). */
+  pkColumn?: string
+  /** The run's single instant, so a `withinLast` exception agrees with the selection rules. */
+  now?: Date
   /** Stable identity of the originating entity — drives cross-table fake-value consistency. */
   identityKey: string
   /** This specific row's key — drives per-row perturbation (jitter). */
@@ -100,9 +149,34 @@ export function anonymizeRow(row: Row, ctx: AnonymizeContext): Row {
   const out: Row = { ...row }
   for (const [column, rule] of ctx.strategies) {
     if (!(column in out)) continue
-    out[column] = applyRule(out[column], rule, column, ctx)
+    out[column] = applyRule(out[column], ruleFor(row, column, rule, ctx), column, ctx)
   }
   return out
+}
+
+/**
+ * The rule this row gets for `column`: the exception's when its conditions match, else the main one.
+ *
+ * Tested against `row`, the values as read from the source, never the partly anonymized copy. An
+ * exception on `email` that asks "ends with @acme.com" must see the real email even when another
+ * column's strategy, or this one, has already run.
+ */
+function ruleFor(
+  row: Row,
+  column: string,
+  rule: FieldStrategyRule,
+  ctx: AnonymizeContext
+): FieldStrategyRule {
+  const exception = ctx.exceptions?.get(column)
+  if (!exception || exception.conditions.length === 0) return rule
+  const matched = evaluateConditions(
+    row,
+    exception.conditions,
+    exception.match,
+    ctx.pkColumn ?? '',
+    ctx.now ?? new Date()
+  )
+  return matched ? exception.rule : rule
 }
 
 function applyRule(
@@ -117,30 +191,36 @@ function applyRule(
     case 'redact':
       return null
     case 'fake': {
+      if (value === null || value === undefined) return value // nothing there to replace
       const generate = GENERATORS[rule.generator]
       const base = `${ctx.identityKey}:${rule.generator}`
       // Non-unique column: single deterministic value keyed on identity + generator.
+      const input = (attempt: number): GeneratorInput => ({
+        value,
+        identityKey: ctx.identityKey,
+        attempt
+      })
       if (!ctx.uniqueColumns?.has(column) || !ctx.usedValues) {
         ctx.faker.seed(seedInt(base))
-        return generate(ctx.faker)
+        return generate(ctx.faker, input(0))
       }
       // Unique column: keep the first-attempt value identical to the non-unique case (so
       // cross-table consistency holds), then salt deterministically only on an actual collision.
       const used = ctx.usedValues.get(column) ?? new Set<unknown>()
       if (!ctx.usedValues.has(column)) ctx.usedValues.set(column, used)
-      let value: unknown
+      let faked: unknown
       for (let attempt = 0; attempt < MAX_UNIQUE_ATTEMPTS; attempt++) {
         ctx.faker.seed(seedInt(attempt === 0 ? base : `${base}:dup${attempt}`))
-        value = generate(ctx.faker)
-        if (!used.has(value)) break
+        faked = generate(ctx.faker, input(attempt))
+        if (!used.has(faked)) break
       }
-      used.add(value)
-      return value
+      used.add(faked)
+      return faked
     }
     case 'template':
       return applyTemplate(value, rule.bindings, column, ctx)
     case 'obfuscate':
-      return obfuscate(value, rule.side, rule.count, column, ctx)
+      return obfuscate(value, rule, column, ctx)
     case 'jitter': {
       const num = toNumber(value)
       if (num === null) return value // non-numeric / null → leave untouched
@@ -212,13 +292,14 @@ function applyTemplate(
       default: {
         const generate = binding.generator ? GENERATORS[binding.generator] : undefined
         if (!generate) break // unknown/missing generator (stale config) — skip, don't crash the run
-        overlayPath(target, binding.path, () => {
+        overlayPath(target, binding.path, (current) => {
+          if (current === null) return current // a null leaf stays null, like a null column
           // Seeded per leaf on identity + column + path, so a re-run reproduces the same blob and two
           // paths bound to the same generator (`address1`/`address2` → streetAddress) don't collide on
           // one value. Cross-column consistency with the scalar `fake` strategy is deliberately not
           // attempted: a bound leaf is identified by where it lives.
           ctx.faker.seed(seedInt(`${ctx.identityKey}:${column}:${binding.path}`))
-          return generate(ctx.faker)
+          return generate(ctx.faker, { value: current, identityKey: ctx.identityKey, attempt: 0 })
         })
       }
     }
@@ -286,13 +367,13 @@ function resolveParent(
 function overlayPath(
   target: Record<string, unknown>,
   path: string,
-  produce: () => unknown
+  produce: (current: unknown) => unknown
 ): boolean {
   const parent = resolveParent(target, path)
   if (!parent) return false
   const { node, leaf } = parent
   if (!(leaf in node)) return false
-  node[leaf] = produce()
+  node[leaf] = produce(node[leaf])
   return true
 }
 
@@ -348,7 +429,8 @@ function scrambleChar(ch: string, faker: Faker): string {
 }
 
 /**
- * Scramble the first or last `count` characters of a value, preserving each one's character class.
+ * Scramble part of a value, preserving each character's class: the first or last `count`
+ * characters, or everything before the last occurrence of a delimiter.
  *
  * **Seeded on the value itself**, not on the row — so two rows holding the same reference scramble
  * to the same output, and a join or a lookup on that column survives the dump. Seeding per row
@@ -357,7 +439,8 @@ function scrambleChar(ch: string, faker: Faker): string {
  * identical outputs reveal identical inputs.
  *
  * `count` is a floor on how much is hidden, so a value **shorter** than `count` is scrambled in
- * full rather than partially — never less than was asked for.
+ * full rather than partially — never less than was asked for. In the same spirit, a value that
+ * doesn't contain the `before` delimiter is scrambled in full rather than passed through.
  *
  * Applies to text; a number or bigint is scrambled through its decimal form and returned as **text**
  * so no precision or range question arises (the digits still load into a numeric column, which
@@ -366,8 +449,7 @@ function scrambleChar(ch: string, faker: Faker): string {
  */
 function obfuscate(
   value: unknown,
-  side: ObfuscateSide,
-  count: number,
+  rule: Extract<FieldStrategyRule, { kind: 'obfuscate' }>,
   column: string,
   ctx: AnonymizeContext
 ): unknown {
@@ -377,16 +459,30 @@ function obfuscate(
   }
 
   const text = String(value)
+  if (text.length === 0) return value
+  ctx.faker.seed(seedInt(`${column}:${text}`))
+
+  if (rule.side === 'before') {
+    // Split on the delimiter in the original string, then scramble the prefix by code point. The
+    // split index is a UTF-16 offset, but it always falls on a boundary of a whole delimiter match.
+    const at = rule.delimiter ? text.lastIndexOf(rule.delimiter) : -1
+    const prefix = at === -1 ? text : text.slice(0, at)
+    const rest = at === -1 ? '' : text.slice(at)
+    return scrambleRun([...prefix], 0, Infinity, ctx.faker).join('') + rest
+  }
+
   // Split into code points before measuring, not after: `.length` counts UTF-16 units, so an emoji
   // or any astral character would make the index arithmetic disagree with the array and scramble
   // the wrong run. The dump already goes to lengths to carry those characters intact (`utf8mb4`).
   const chars = [...text]
-  if (chars.length === 0) return value
+  const n = Math.min(rule.count, chars.length)
+  const start = rule.side === 'first' ? 0 : chars.length - n
+  return scrambleRun(chars, start, n, ctx.faker).join('')
+}
 
-  ctx.faker.seed(seedInt(`${column}:${text}`))
-  const n = Math.min(count, chars.length)
-  const start = side === 'first' ? 0 : chars.length - n
-
-  for (let i = start; i < start + n; i++) chars[i] = scrambleChar(chars[i], ctx.faker)
-  return chars.join('')
+/** Scramble `chars[start .. start + n)` in place (clamped to the array) and return the array. */
+function scrambleRun(chars: string[], start: number, n: number, faker: Faker): string[] {
+  const end = Math.min(chars.length, start + n)
+  for (let i = start; i < end; i++) chars[i] = scrambleChar(chars[i], faker)
+  return chars
 }

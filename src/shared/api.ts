@@ -12,6 +12,7 @@ import type {
   Connection,
   ConnectionTestResult,
   FieldStrategy,
+  FieldStrategyException,
   FkBackfillPolicy,
   ForeignKeyEdge,
   JsonPathSample,
@@ -40,7 +41,10 @@ export type ConnectionInput = Omit<Connection, 'id'>
 export type TableClassificationInput = Omit<TableClassification, 'id' | 'source'> &
   Partial<Pick<TableClassification, 'source'>>
 export type SelectionRuleInput = Omit<SelectionRule, 'id'>
-export type FieldStrategyInput = Omit<FieldStrategy, 'id'>
+/** `exception: null` clears a stored exception; on an update, leaving the key out keeps it. */
+export type FieldStrategyInput = Omit<FieldStrategy, 'id' | 'invalid' | 'exception'> & {
+  exception?: FieldStrategyException | null
+}
 export type TableLocaleSourceInput = Omit<TableLocaleSource, 'id'>
 export type TableIdentitySourceInput = Omit<TableIdentitySource, 'id'>
 export type MorphRelationInput = Omit<MorphRelation, 'id'>

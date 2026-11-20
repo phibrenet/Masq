@@ -33,10 +33,18 @@ isn't self-explanatory. One or two sentences each.
   by a framework's presets (`preset:<framework>`). What lets re-applying presets refresh their own
   rows without ever overwriting a deliberate choice.
 
-- **Obfuscate** — a field strategy that scrambles the first or last N characters of a value while
+- **Exception (field strategy)** — a second rule on the same column for the rows that match a set of
+  conditions, e.g. `users.email` → email from ID, except staff-domain rows → email from ID keeping
+  the domain. Conditions test the source values. See `decisions.md` 2026-11-04.
+
+- **ID-keyed email** — the `userIdEmail` / `userIdEmailKeepDomain` generators: `user<id>@example.com`
+  or `user<id>@<original domain>`, where `<id>` comes from the row's identity key.
+
+- **Obfuscate** — a field strategy that scrambles the first or last N characters of a value (minimum
+  6), or everything before the last occurrence of a delimiter (`before`, e.g. `@`), while
   preserving each character's class (letter→letter, digit→digit, punctuation untouched), so the
-  result keeps the original's shape. Minimum 6 characters; seeded on the value, so identical inputs
-  scramble identically and joins on the column survive.
+  result keeps the original's shape. Seeded on the value, so identical inputs scramble identically
+  and joins on the column survive.
 
 - **Selection rule** — how rows are chosen from a transactional table: a *filter* (`where` +
   `match`, or a `rawWhere` SQL escape hatch) plus a *take*, carrying an `anonymize` flag. Migration
