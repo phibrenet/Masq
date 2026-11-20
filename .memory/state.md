@@ -5,6 +5,19 @@ status changes.
 
 _Last updated: 2026-11-04 (field-strategy exceptions, ID-keyed emails; exampleEmail/ipAddress generators, obfuscate before, NULL stays NULL, template redact/remove leak fixed); 2026-10-03 (open-source alpha readiness cleanup); 2026-09-27 (UI refresh merged); 2026-09-24 (Linux dev-setup: `Electron uninstall` after a version bump; 2026-09-22: `obfuscate` field strategy; backtick DDL normalisation + interleaved drops; framework catalogue + classification provenance; `structure` table class; dump drop-tables option + encoding declaration built; ponytail audit reviewed and accepted cuts applied; workspace export/import built; Example Shop extract findings below)_
 
+## Dev environment repair — 2026-11-20
+
+`Electron uninstall` recurred: installed Electron 44.11.5 had no `path.txt` or `dist/`.
+Ran `node node_modules/electron/install.js` and
+`npm exec --no -- electron-builder install-app-deps`. Electron now runs with ABI 149 and
+loads `better-sqlite3` against an in-memory database. Lint, typecheck and all 335 tests pass.
+
+A dev launch with a temporary `--user-data-dir` builds and starts Electron, then aborts
+because the newly extracted `chrome-sandbox` is owned by `lloyd` with mode 755. The owner
+must run the existing Linux sandbox-helper repair below (`sudo chown root:root`, then
+`sudo chmod 4755`); sudo requires a password unavailable to this session. GUI startup
+remains unverified until that repair. No application code or dependency versions changed.
+
 ## Built 2026-11-04: field-strategy exceptions + ID-keyed emails (migration 018, uncommitted)
 
 - A strategy can have one exception: a different rule for rows matching conditions (the
