@@ -1,6 +1,7 @@
 import { escape as mysqlEscape, escapeId as mysqlEscapeId } from 'mysql2'
 import { escapeIdentifier as pgEscapeId, escapeLiteral as pgEscapeLiteral } from 'pg'
 import type { ExtensionInfo } from '../adapters/types'
+import { splitPostgresTableDdl } from '../adapters/postgres-ddl'
 
 /**
  * Dialect-specific SQL fragments the dump writer needs (spec §9). Kept behind an interface so the
@@ -88,6 +89,8 @@ export interface DumpDialect {
    * comma left when the removed constraint was the last item.
    */
   stripForeignKeysTo(ddl: string, absentTables: Set<string>): string
+  /** PostgreSQL FKs/triggers must follow every table and the required function definitions. */
+  splitTableDdl?(ddl: string): { tableDdl: string; deferredDdl: string[] }
   /**
    * Reset `table.column`'s sequence so the next INSERT doesn't collide with the loaded rows.
    * Emitted after the data section. **Omitted where the dialect self-heals:** MySQL's
@@ -373,7 +376,8 @@ const postgresDumpDialectBase: DumpDialect = {
       `COALESCE(MAX(${col}), 1), MAX(${col}) IS NOT NULL) FROM ${pgEscapeId(table)};`
     )
   },
-  stripForeignKeysTo: postgresStripForeignKeysTo
+  stripForeignKeysTo: postgresStripForeignKeysTo,
+  splitTableDdl: splitPostgresTableDdl
 }
 
 // ── SQLite ────────────────────────────────────────────────────────────────────

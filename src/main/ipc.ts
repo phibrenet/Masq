@@ -9,12 +9,7 @@ import {
   listWorkspaces,
   updateWorkspace
 } from './config/repositories/workspaces'
-import {
-  createConnection,
-  deleteConnection,
-  listConnectionsByWorkspace,
-  updateConnection
-} from './config/repositories/connections'
+import { deleteConnection, listConnectionsByWorkspace } from './config/repositories/connections'
 import {
   applyFrameworkPresets,
   deleteTableClassification,
@@ -55,7 +50,11 @@ import {
   setFkBackfillPolicy
 } from './config/repositories/fk-backfill-policies'
 import { listRunsByWorkspace } from './config/repositories/runs'
-import { hasPassword, setPassword } from './config/credentials'
+import { hasPassword, setPassword, hasSshSecret } from './config/credentials'
+import {
+  createConnectionWithSecrets,
+  updateConnectionWithSecrets
+} from './config/connection-service'
 import {
   exportWorkspaceConfig,
   importWorkspaceConfig,
@@ -126,9 +125,10 @@ const handlers: {
   importWorkspace: async (file, name) => importWorkspaceConfig(file, name),
 
   listConnectionsByWorkspace: async (workspaceId) => listConnectionsByWorkspace(workspaceId),
-  createConnection: async (input) => createConnection(input),
-  updateConnection: async (id, patch) => updateConnection(id, patch),
+  createConnection: async (input, secrets) => createConnectionWithSecrets(input, secrets),
+  updateConnection: async (id, patch, secrets) => updateConnectionWithSecrets(id, patch, secrets),
   deleteConnection: async (id) => deleteConnection(id),
+  hasSshSecret: async (id) => hasSshSecret(id),
 
   setPassword: async (connectionId, plaintext) => setPassword(connectionId, plaintext),
   hasPassword: async (connectionId) => hasPassword(connectionId),

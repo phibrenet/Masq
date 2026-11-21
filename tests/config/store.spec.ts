@@ -53,7 +53,7 @@ const userData = mkdtempSync(join(tmpdir(), 'masq-store-spec-'))
 const previousUserData = process.env.MASQ_TEST_USERDATA
 process.env.MASQ_TEST_USERDATA = userData
 
-const MIGRATION_COUNT = 18
+const MIGRATION_COUNT = 19
 
 beforeAll(() => {
   runMigrations()
@@ -768,7 +768,14 @@ describe('connection CRUD', () => {
       database: 'tenant_db',
       username: 'subsetter_ro',
       searchPath: '"tenant,archive", public',
-      filePath: undefined
+      filePath: undefined,
+      sshEnabled: false,
+      sshHost: undefined,
+      sshPort: undefined,
+      sshUsername: undefined,
+      sshAuthMethod: undefined,
+      sshPrivateKeyPath: undefined,
+      sshHostFingerprint: undefined
     })
 
     const patched = updateConnection(created.id, { label: 'Renamed' })

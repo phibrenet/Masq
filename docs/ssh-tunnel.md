@@ -1,7 +1,43 @@
 # SSH tunnelling for source connections — design plan
 
-_Status: **PLANNED**, not built (captured 2026-08-20). No code exists yet; nothing in the config
-store, the adapters, or the UI knows about SSH. This is the design record to build from._
+_Implementation added 2026-11-20. The original 2026-08-20 design below is retained as a
+historical proposal; current choices and validation are recorded in `.memory/decisions.md`
+and `.memory/state.md`._
+
+Current support: MySQL/Postgres, password or private key file with an optional encrypted
+passphrase, migration **019**, a separate encrypted `ssh_credentials` table, loopback forwarding
+for knex and `pg_dump`, and native first-use host-key trust with pinned-key rejection on changes.
+SSH agent auth and known_hosts parsing are deferred. A public `.pub` file belongs on the server;
+Masq needs the matching private key. Secrets/settings are saved atomically. Changing SSH
+identity clears a saved SSH password; local key passphrases are retained for the same key
+file. Changing the server endpoint clears its trusted key.
+
+In Connections, enable **Connect over SSH**, enter the SSH server/user and select authentication.
+Keep the database Host/Port set to the address reachable **from the SSH server**. Save, then use
+**Test** and compare the server fingerprint before trusting it. To accept a legitimate changed
+host key, verify it independently, then use **Forget trusted host key** and **Save changes**
+in the edit form. Cancel leaves the trusted key intact.
+
+## Verification
+
+### Running the live integration checks
+
+`npm test` includes real in-process SSH forwarding/auth/trust/disconnect tests. Full database
+extract/restore tests opt in with **disposable** MySQL and PostgreSQL fixture ports. Both
+fixtures must have database `masq_ssh_fixture`, password `masq-fixture-db-password`, and the
+default `root` / `postgres` administrator user. These tests replace `users` inside that
+fixture database. They never use your saved connections. PostgreSQL requires local `pg_dump`.
+
+```sh
+MASQ_SSH_MYSQL_TEST_PORT=<local-mysql-port> \
+MASQ_SSH_POSTGRES_TEST_PORT=<local-postgres-port> \
+npm test -- tests/integration/ssh-databases.spec.ts
+```
+
+The destination hostname is deliberately unresolvable from the desktop, and the SSH fixture
+alone maps it to the database. A direct connection must fail before the tunneled extract runs.
+
+## Historical plan
 
 Reach a production database that isn't directly routable — the normal case, not the exception. A
 database that accepts connections from the open internet is a misconfiguration; the realistic

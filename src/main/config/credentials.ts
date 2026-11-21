@@ -31,6 +31,10 @@ function assertProtected(): void {
 }
 
 export function setPassword(connectionId: string, plaintext: string): void {
+  if (!plaintext) {
+    getDb().prepare('DELETE FROM credentials WHERE connection_id = ?').run(connectionId)
+    return
+  }
   assertAvailable()
   assertProtected()
   const encrypted = safeStorage.encryptString(plaintext)
@@ -54,4 +58,36 @@ export function getPassword(connectionId: string): string | undefined {
 export function hasPassword(connectionId: string): boolean {
   const row = getDb().prepare('SELECT 1 FROM credentials WHERE connection_id = ?').get(connectionId)
   return row !== undefined
+}
+
+export function setSshSecret(connectionId: string, plaintext: string): void {
+  if (!plaintext) {
+    getDb().prepare('DELETE FROM ssh_credentials WHERE connection_id = ?').run(connectionId)
+    return
+  }
+  assertAvailable()
+  assertProtected()
+  const encrypted = safeStorage.encryptString(plaintext)
+  getDb()
+    .prepare(
+      `INSERT INTO ssh_credentials (connection_id, encrypted_secret) VALUES (?, ?)
+    ON CONFLICT (connection_id) DO UPDATE SET encrypted_secret = excluded.encrypted_secret`
+    )
+    .run(connectionId, encrypted)
+}
+
+export function getSshSecret(connectionId: string): string | undefined {
+  const row = getDb()
+    .prepare('SELECT encrypted_secret FROM ssh_credentials WHERE connection_id = ?')
+    .get(connectionId) as { encrypted_secret: Buffer } | undefined
+  if (!row) return undefined
+  assertAvailable()
+  return safeStorage.decryptString(row.encrypted_secret)
+}
+
+export function hasSshSecret(connectionId: string): boolean {
+  return (
+    getDb().prepare('SELECT 1 FROM ssh_credentials WHERE connection_id = ?').get(connectionId) !==
+    undefined
+  )
 }

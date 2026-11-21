@@ -1,6 +1,8 @@
 import type { Connection } from '@shared/types'
 import { getConnection } from '../config/repositories/connections'
-import { getPassword } from '../config/credentials'
+import { getPassword, getSshSecret } from '../config/credentials'
+import { openSshTunnel, type SshTunnel } from './ssh-tunnel'
+import { verifySshHostKey } from './ssh-host-key'
 import { createKnex } from './knex-factory'
 import { MySQLAdapter } from './mysql'
 import { PostgresAdapter } from './postgres'
@@ -9,6 +11,43 @@ import { parseSearchPath } from './search-path'
 import type { DbAdapter } from './types'
 
 export type { DbAdapter } from './types'
+
+/** Check buffered rows too: losing SSH must not turn a truncated stream into a valid dump. */
+function withSshHealth(adapter: DbAdapter, tunnel: SshTunnel): DbAdapter {
+  function check(): void {
+    if (tunnel.failure) throw tunnel.failure
+  }
+  return new Proxy(adapter, {
+    get(target, property, receiver) {
+      if (property === 'streamRows') {
+        return async function* (...args: Parameters<DbAdapter['streamRows']>) {
+          check()
+          try {
+            for await (const row of target.streamRows(...args)) {
+              check()
+              yield row
+            }
+            check()
+          } catch (error) {
+            throw tunnel.failure ?? error
+          }
+        }
+      }
+      const value = Reflect.get(target, property, receiver)
+      if (typeof value !== 'function') return value
+      return async (...args: unknown[]) => {
+        check()
+        try {
+          const result = await value.apply(target, args)
+          check()
+          return result
+        } catch (error) {
+          throw tunnel.failure ?? error
+        }
+      }
+    }
+  })
+}
 
 /**
  * Build the right adapter for a connection over an existing knex handle.
@@ -68,10 +107,26 @@ export async function withSourceAdapter<T>(
   if (!connection) throw new Error('Connection not found.')
 
   const password = getPassword(connectionId)
-  const db = createKnex(connection, password)
+  const tunnel = connection.sshEnabled
+    ? await openSshTunnel(connection, getSshSecret(connectionId), (fingerprint, signal) =>
+        verifySshHostKey(connection, fingerprint, signal)
+      )
+    : undefined
+  const effective = tunnel ? { ...connection, host: tunnel.host, port: tunnel.port } : connection
+  let db: ReturnType<typeof createKnex> | undefined
   try {
-    return await fn(makeAdapter(connection, db, password))
+    db = createKnex(effective, password)
+    const adapter = makeAdapter(effective, db, password)
+    const result = await fn(tunnel ? withSshHealth(adapter, tunnel) : adapter)
+    if (tunnel?.failure) throw tunnel.failure
+    return result
+  } catch (error) {
+    throw tunnel?.failure ?? error
   } finally {
-    await db.destroy()
+    try {
+      await db?.destroy()
+    } finally {
+      await tunnel?.close()
+    }
   }
 }

@@ -36,7 +36,15 @@ export type WorkspaceInput = Pick<Workspace, 'name'> &
     /** `null` clears it back to "no framework" — distinct from omitting the key, which keeps it. */
     framework?: FrameworkId | null
   }
-export type ConnectionInput = Omit<Connection, 'id'>
+export type ConnectionInput = Omit<Connection, 'id' | 'sshHostFingerprint'> & {
+  /** Update-only action applied atomically with Save; does not persist as a setting. */
+  forgetSshHostKey?: boolean
+}
+/** Write-only secrets. Undefined keeps a saved secret; an empty string clears it. */
+export interface ConnectionSecrets {
+  password?: string
+  sshSecret?: string
+}
 /** `source` is optional: omitting it records a hand edit, which is what the UI always does. */
 export type TableClassificationInput = Omit<TableClassification, 'id' | 'source'> &
   Partial<Pick<TableClassification, 'source'>>
@@ -63,9 +71,14 @@ export interface ConfigApi {
   importWorkspace(file: WorkspaceTransfer, name: string): Promise<Workspace>
 
   listConnectionsByWorkspace(workspaceId: string): Promise<Connection[]>
-  createConnection(input: ConnectionInput): Promise<Connection>
-  updateConnection(id: string, patch: Partial<ConnectionInput>): Promise<Connection | undefined>
+  createConnection(input: ConnectionInput, secrets?: ConnectionSecrets): Promise<Connection>
+  updateConnection(
+    id: string,
+    patch: Partial<ConnectionInput>,
+    secrets?: ConnectionSecrets
+  ): Promise<Connection | undefined>
   deleteConnection(id: string): Promise<void>
+  hasSshSecret(connectionId: string): Promise<boolean>
 
   /** Password handling — plaintext crosses IPC once, then lives only as a keychain blob. */
   setPassword(connectionId: string, plaintext: string): Promise<void>
@@ -229,6 +242,8 @@ export interface SystemApi {
   showItemInFolder(path: string): Promise<void>
   /** Native folder picker seeded at `current`. Resolves to the chosen path, or null if dismissed. */
   chooseDirectory(current?: string): Promise<string | null>
+  /** Choose a private key file. Returns only its path, never its contents. */
+  chooseSshPrivateKey(): Promise<string | null>
   /**
    * Turn typed folder text into the absolute path that would actually be stored, or say why it
    * can't be one. Blank returns neither — that's "use the default", not a problem.

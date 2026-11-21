@@ -117,6 +117,7 @@ export async function runExtract(
     if (err instanceof CancelledError) {
       return failRun(run.id, 'Cancelled before it finished — no dump was written.', warnings) ?? run
     }
+    if (/^SSH[ :]/.test((err as Error).message)) warnings.push((err as Error).message)
     failRun(run.id, (err as Error).message, warnings)
     throw err
   } finally {
@@ -494,6 +495,8 @@ export async function executePipeline(
   const plan: DumpPlan = {
     tables: dumpTables,
     dialect,
+    triggerFunctions:
+      connection.dialect === 'postgres' ? await adapter.getTriggerFunctions?.(ordered) : undefined,
     dropExistingTables: workspace.dropExistingTables
   }
 

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
-import type { ConnectionInput } from '@shared/api'
+import type { ConnectionInput, ConnectionSecrets } from '@shared/api'
 import type { Connection } from '@shared/types'
 import { useWorkspaceStore } from '@renderer/stores/workspace'
 import { useConnectionTestsStore } from '@renderer/stores/connectionTests'
@@ -46,45 +46,28 @@ export const useConnectionsStore = defineStore('connections', () => {
   }
 
   /**
-   * Persist a new connection, then (if given) store its password in the keychain. The
-   * created row is merged into `all` so the current-workspace `list` updates without a
-   * refetch. Password is sent once, separately — it never lives on the `Connection`.
+   * Main saves settings and encrypted credentials atomically. Secrets are write-only arguments,
+   * never properties on the returned Connection or this store's cached values.
    */
-  async function create(input: ConnectionInput, password?: string): Promise<Connection> {
-    const created = await window.api.config.createConnection(input)
-    if (password) {
-      try {
-        await window.api.config.setPassword(created.id, password)
-      } catch (err) {
-        // The row must exist before its credential (FK), so we can't store the password
-        // first here. If the keychain write fails, roll the orphaned row back so a failed
-        // save leaves no half-created connection behind.
-        await window.api.config.deleteConnection(created.id).catch(() => {})
-        throw err
-      }
-    }
+  async function create(input: ConnectionInput, secrets?: ConnectionSecrets): Promise<Connection> {
+    const created = await window.api.config.createConnection(input, secrets)
     all.value = [...all.value, created]
     return created
   }
 
   /**
-   * Persist changes to an existing connection. If a non-empty password is given, replace its
-   * keychain entry *first*: that's the step that can realistically fail (keychain may be
-   * unavailable), so doing it before the row write means a failure leaves nothing half-applied
-   * — no case where the DB holds the new host/user with the old password while the UI reports
-   * failure. An empty/undefined password leaves the stored one intact. The updated row is
-   * merged back into `all` so `list` reflects it without a refetch.
+   * Main updates settings and credentials in one transaction. Omitted secrets are preserved
+   * unless the SSH identity changes; an explicit empty string clears a stored secret.
    */
   async function update(
     id: string,
     patch: Partial<ConnectionInput>,
-    password?: string
+    secrets?: ConnectionSecrets
   ): Promise<Connection | undefined> {
     // Up front, even if the save then fails: the password step may already have changed what a
     // test would find, and "Not tested" is the honest state either way.
     tests.forget(id)
-    if (password) await window.api.config.setPassword(id, password)
-    const updated = await window.api.config.updateConnection(id, patch)
+    const updated = await window.api.config.updateConnection(id, patch, secrets)
     if (updated) all.value = all.value.map((c) => (c.id === id ? updated : c))
     return updated
   }

@@ -147,8 +147,9 @@ For the security model (assets, trust boundaries and the code that enforces each
 
 **Alpha.** MySQL, PostgreSQL and SQLite adapters are implemented. MySQL has the most live-use
 validation; automated fixtures do not establish compatibility with every schema or server version.
-Expect rough edges, and please report them. SQL Server is planned for v2, and SSH tunnelling to private databases is
-designed ([docs/ssh-tunnel.md](docs/ssh-tunnel.md)) but not built yet. There are no release builds
+Expect rough edges, and please report them. MySQL/PostgreSQL connections support
+[SSH tunnels](docs/ssh-tunnel.md) with a password or private key. SQL Server is planned for v2.
+There are no release builds
 yet ([Getting started](#getting-started) covers running from source). Packaging, signing and
 auto-update are the next milestone.
 
@@ -163,8 +164,12 @@ auto-update are the next milestone.
   advisory, and deterministic fake/obfuscated values do not guarantee that people cannot be identified.
 - Inspect dumps before sharing, including JSON, free text and reference data. Treat workspace
   exports and logs as potentially sensitive too. A completed run is not a privacy certification.
-- Known restore limits include PostgreSQL cyclic foreign keys and custom-type dependencies omitted
-  by per-table `pg_dump`, foreign keys targeting non-primary-key columns, and possible UNIQUE
+- PostgreSQL creates tables before foreign keys/triggers and includes their direct trigger
+  function definitions. Custom types and helper functions called by those bodies are not
+  recursively exported. Function bodies are preserved schema code, not anonymized data.
+  Built-in trigger functions remain supplied by PostgreSQL. Policies, rules and partition
+  attachments with cross-table dependencies may still require manual restore ordering.
+- Known restore limits include foreign keys targeting non-primary-key columns and possible UNIQUE
   collisions from obfuscation. Review run warnings and test a restore into a disposable database.
 - Selection and streaming do not share a consistent source snapshot. Concurrent changes can affect
   the result, and relationships may remain unresolved when backfill is disabled or unsupported.
@@ -188,6 +193,13 @@ npm run build:mac  # or build:win / build:linux: produce installers (unsigned)
 
 If `npm run dev` fails with `Error: Electron uninstall`, the Electron binary didn't download during
 install. Run `node node_modules/electron/install.js` and try again.
+
+For a private database, enable **Connect over SSH** in the connection form. Enter the SSH
+server, port and username, then choose an SSH password or private key file (with an optional
+passphrase). A `.pub` file belongs on the server; select its matching private key in Masq.
+The database Host/Port must be reachable from the SSH server. On the first **Test**, compare
+the server fingerprint with your administrator's copy before choosing **Trust and remember**.
+SSH passwords/passphrases are stored encrypted; the private key stays in its original file.
 
 ## Tech stack
 
