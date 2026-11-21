@@ -88,6 +88,15 @@ are still the recommendation.
 
 `pg_dump` is found on `PATH` (see §5).
 
+PostgreSQL trigger functions for included tables are read with `pg_get_functiondef` in
+`src/main/adapters/postgres.ts` and emitted before trigger creation. These definitions are
+schema code, including any literals in their bodies, and are preserved without anonymization.
+They are not executed against the source. Restoring a dump executes its schema/functions
+under the destination user's privileges. Built-in `pg_catalog` functions are never exported
+or replaced; their trigger declarations use the destination's built-ins. Extension-owned
+functions come from the extension preamble; arbitrary helper functions and custom types are
+not recursively exported.
+
 ### 3.4 Credentials at rest
 
 | Control                                                                                       | Enforced in                                                       |
@@ -95,6 +104,11 @@ are still the recommendation.
 | `safeStorage` (Keychain / DPAPI / libsecret). Refuses to save if encryption is unavailable    | `src/main/config/credentials.ts` (`assertAvailable`)              |
 | On Linux, refuses to save under the `basic_text` backend (a fixed key, which only obfuscates) | `src/main/config/credentials.ts` (`assertProtected`)              |
 | Workspace exports never include connections, passwords, dump files or local paths             | `src/main/config/workspace-transfer.ts` (`exportWorkspaceConfig`) |
+
+SSH passwords and private-key passphrases use a separate `ssh_credentials` table with the
+same safeStorage checks (`src/main/config/credentials.ts`). Private key contents are read in
+main at connection time, never returned to the renderer or copied into the config store.
+Settings and both credential writes are transactional (`src/main/config/connection-service.ts`).
 
 ### 3.5 Anonymization pipeline (data leaving production)
 
@@ -117,6 +131,26 @@ are still the recommendation.
 The Field Strategies screen flags columns whose names look like personal data and have no strategy
 (`src/renderer/src/lib/pii.ts`). This is a name heuristic that only covers tables whose columns have
 been read. It is a prompt, not a control.
+
+### 3.6 Main → SSH bastion → source database
+
+`src/main/adapters/ssh-tunnel.ts` uses the explicitly selected password/private-key method,
+with no authentication or direct-route fallback. `src/main/adapters/ssh-host-key.ts` requires
+native-dialog trust on first use and pins the SHA256 server key; changed keys fail before
+authentication. The default is cancel. Users must compare the first fingerprint using a
+trusted channel; Masq does not consult known_hosts. Connection write inputs cannot set pins.
+Changing the SSH host/port clears the pin and the saved SSH password. A private-key passphrase
+is retained for the same key file when the host/user changes; changing key/auth or disabling
+SSH clears it. Main and renderer share this policy in `src/shared/ssh.ts`.
+Expired operations cannot pin a host key after the trust dialog returns. The connection editor
+can mark a pin to be forgotten on Save; Cancel preserves it. The next connection asks for trust again.
+
+Each operation binds an ephemeral forward to `127.0.0.1` only. Both knex and `pg_dump` use
+that endpoint (`src/main/adapters/index.ts`). The source's read-only session is unchanged.
+Pool teardown precedes tunnel teardown. Disconnects destroy active sockets and fail the
+operation; extract failures retain the SSH error in run warnings. No automatic reconnect.
+Other local processes can reach the temporary forward, but still need database credentials;
+same-user attacks remain out of scope. Private key file permissions remain OS-controlled.
 
 ## 4. Threats
 
@@ -168,8 +202,8 @@ Don't re-report these as new findings unless the change makes them worse.
 
 - An attacker who already runs code as the user's OS account (they can read the keychain, the
   config store and the dumps directly).
-- The security of the source database server and the network path to it. SSH tunnelling is planned,
-  not built: `docs/ssh-tunnel.md`.
+- The security of the source database server and the bastion-to-database network. SSH tunnelling
+  protects the desktop-to-bastion hop; it does not configure database TLS on the second hop.
 - What people do with a dump after it's written, and the machines it's loaded onto.
 - Stopping a user from preserving data they chose to preserve. Masq makes the choice visible, and
   enforcing policy on it is not a goal.

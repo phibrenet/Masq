@@ -304,3 +304,65 @@ describe('stream errors', () => {
     ).rejects.toThrow('ENOSPC')
   })
 })
+
+describe('Postgres table/function/foreign-key phases', () => {
+  async function pgTables(): Promise<DumpTable[]> {
+    return [
+      {
+        table: 'child',
+        columns: ['id', 'parent_id', 'tenant_id'],
+        rows: await rows({ id: 1, parent_id: 2, tenant_id: 7 }),
+        ddl: `CREATE TABLE app.child (id int PRIMARY KEY, parent_id int, tenant_id int);
+ALTER TABLE ONLY app.child ADD CONSTRAINT child_parent FOREIGN KEY (parent_id, tenant_id) REFERENCES app.parent(id, tenant_id);
+CREATE TRIGGER child_touch BEFORE UPDATE ON app.child FOR EACH ROW EXECUTE FUNCTION helpers.touch();`
+      },
+      {
+        table: 'parent',
+        columns: ['id', 'tenant_id'],
+        rows: await rows({ id: 2, tenant_id: 7 }),
+        ddl: `CREATE TABLE app.parent (id int, tenant_id int);
+ALTER TABLE ONLY app.parent ADD CONSTRAINT parent_pair UNIQUE (id, tenant_id);
+ALTER TABLE ONLY app.parent ADD CONSTRAINT parent_child FOREIGN KEY (id) REFERENCES app.child(id);`
+      }
+    ]
+  }
+  for (const split of [false, true]) {
+    it(`${split ? 'split' : 'combined'}: creates every table and key before FKs/triggers, including cycles/composite targets`, async () => {
+      const schema = collect()
+      const data = collect()
+      const plan: DumpPlan = {
+        tables: await pgTables(),
+        dialect: createPostgresDumpDialect(['app']),
+        dropExistingTables: true,
+        triggerFunctions: [
+          {
+            schema: 'helpers',
+            ddl: `CREATE OR REPLACE FUNCTION helpers.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;`
+          }
+        ]
+      }
+      if (split) await writeSplitDump(schema.stream, data.stream, plan)
+      else await writeCombinedDump(schema.stream, plan)
+      const sql = schema.text()
+      const lastCreate = sql.indexOf('CREATE TABLE app.parent')
+      const unique = sql.indexOf('ADD CONSTRAINT parent_pair UNIQUE')
+      const functionAt = sql.indexOf('CREATE OR REPLACE FUNCTION helpers.touch')
+      const fk = sql.indexOf('ADD CONSTRAINT child_parent FOREIGN KEY')
+      const trigger = sql.indexOf('CREATE TRIGGER child_touch')
+      expect(lastCreate).toBeGreaterThan(0)
+      expect(lastCreate).toBeLessThan(fk)
+      expect(unique).toBeLessThan(fk)
+      expect(sql.indexOf('CREATE SCHEMA IF NOT EXISTS "helpers"')).toBeLessThan(functionAt)
+      expect(functionAt).toBeLessThan(trigger)
+      expect(sql.indexOf('DROP TABLE IF EXISTS "parent"')).toBeLessThan(fk)
+      expect(sql).toContain(
+        'FOREIGN KEY (parent_id, tenant_id) REFERENCES app.parent(id, tenant_id);'
+      )
+      expect(sql.match(/ADD CONSTRAINT child_parent FOREIGN KEY/g)).toHaveLength(1)
+      if (split) {
+        expect(data.text()).not.toContain('CREATE TRIGGER')
+        expect(data.text()).not.toContain('CREATE OR REPLACE FUNCTION')
+      } else expect(trigger).toBeLessThan(sql.indexOf('INSERT INTO'))
+    })
+  }
+})

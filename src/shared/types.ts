@@ -13,6 +13,7 @@
 export type Dialect = 'mysql' | 'postgres' | 'sqlite' | 'mssql'
 
 export type ConnectionRole = 'source' | 'target'
+export type SshAuthMethod = 'privateKey' | 'password'
 
 export interface Connection {
   id: string
@@ -36,6 +37,16 @@ export interface Connection {
   searchPath?: string
   /** File-based dialects (sqlite). Mutually exclusive with the server fields. */
   filePath?: string
+  /** MySQL/Postgres only. Database host/port are resolved from the SSH server. */
+  sshEnabled?: boolean
+  sshHost?: string
+  sshPort?: number
+  sshUsername?: string
+  sshAuthMethod?: SshAuthMethod
+  /** Path only; key contents stay in the main process and are never stored. */
+  sshPrivateKeyPath?: string
+  /** SHA256 host key pinned only after a native trust dialog. */
+  sshHostFingerprint?: string
 }
 
 import type { FrameworkId } from './frameworks'

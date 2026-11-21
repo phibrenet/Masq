@@ -5,7 +5,7 @@ import type { ColumnInfo, ForeignKeyRef, Row } from '@shared/types'
 import { applyFilter, applyTake } from '../extract/conditions'
 import { throwIfCancelled } from '../extract/cancel'
 import { applyRowFilter, type RowFilter } from '../extract/row-filter'
-import type { DbAdapter, ExtensionInfo, SelectRowsOptions } from './types'
+import type { DbAdapter, ExtensionInfo, SelectRowsOptions, TriggerFunction } from './types'
 
 const execFileAsync = promisify(execFile)
 
@@ -202,6 +202,33 @@ export class PostgresAdapter implements DbAdapter {
       referencedTable: r.referencedTable,
       referencedColumn: r.referencedColumn
     }))
+  }
+
+  async getTriggerFunctions(tables: string[]): Promise<TriggerFunction[]> {
+    if (tables.length === 0) return []
+    // Resolve the same bare table names as table DDL, including search-path shadowing.
+    const relations = await Promise.all(
+      tables.map(async (table) => `${quoteIdent(await this.schemaOf(table))}.${quoteIdent(table)}`)
+    )
+    const { rows } = await this.db.raw<{ rows: TriggerFunction[] }>(
+      `SELECT DISTINCT p.oid, n.nspname AS schema, pg_get_functiondef(p.oid) AS ddl
+         FROM pg_trigger t
+         JOIN pg_proc p ON p.oid = t.tgfoid
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE t.tgrelid = ANY(ARRAY(SELECT name::regclass FROM unnest(?::text[]) AS name))
+          AND NOT t.tgisinternal
+          -- Built-in trigger functions already exist on the destination. Recreating them
+          -- fails for ordinary users and can overwrite system catalog entries as superuser.
+          AND n.nspname <> 'pg_catalog'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_depend d
+             WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+               AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+          )
+        ORDER BY p.oid`,
+      [relations]
+    )
+    return rows.map(({ schema, ddl }) => ({ schema, ddl }))
   }
 
   /**
@@ -496,8 +523,10 @@ export class PostgresAdapter implements DbAdapter {
     }
 
     const clientMajor = majorVersion(versionText)
-    const { rows } = await this.db.raw<{ rows: { v: string }[] }>('SHOW server_version')
-    const serverMajor = majorVersion(rows[0]?.v ?? '')
+    const { rows } = await this.db.raw<{ rows: { server_version: string }[] }>(
+      'SHOW server_version'
+    )
+    const serverMajor = majorVersion(rows[0]?.server_version ?? '')
 
     if (clientMajor !== undefined && serverMajor !== undefined && clientMajor < serverMajor) {
       throw new Error(

@@ -3,7 +3,87 @@
 Always answers: "if I sat down right now, what would I work on?" Update whenever build
 status changes.
 
-_Last updated: 2026-11-04 (field-strategy exceptions, ID-keyed emails; exampleEmail/ipAddress generators, obfuscate before, NULL stays NULL, template redact/remove leak fixed); 2026-10-03 (open-source alpha readiness cleanup); 2026-09-27 (UI refresh merged); 2026-09-24 (Linux dev-setup: `Electron uninstall` after a version bump; 2026-09-22: `obfuscate` field strategy; backtick DDL normalisation + interleaved drops; framework catalogue + classification provenance; `structure` table class; dump drop-tables option + encoding declaration built; ponytail audit reviewed and accepted cuts applied; workspace export/import built; Example Shop extract findings below)_
+_Last updated: 2026-11-21 (PostgreSQL built-in trigger-function review fix verified). Earlier milestones are recorded below._
+
+## Fixed 2026-11-21: built-in PostgreSQL trigger functions stay built-in
+
+Claude found that user-created triggers calling `pg_catalog` functions caused their built-in
+definitions to be exported. Discovery now excludes that schema, keeping the trigger declarations
+and the existing extension-owned exclusion. No catalog function is recreated on restore.
+
+Lint, typecheck, build and the default suite pass (380 tests, seven opt-in cases skipped).
+Five schema cases passed with a disposable PostgreSQL 18 fixture. The new case restores as
+a non-superuser, exercises tsvector_update_trigger and suppress_redundant_updates_trigger,
+and verifies the built-in pg_proc rows' xmin values did not change. The four combined/split
+drop-on/off cases still restore the user-defined function. Claude rechecked the code read-only
+and confirmed the Medium resolved with no regressions; the live run was performed here.
+The fixture container was removed. Cross-table policy/rule/partition ordering remains a
+documented limitation rather than being folded into the FK/trigger fix.
+
+## Fixed 2026-11-20: PostgreSQL schema restore ordering + trigger functions
+
+Confirmed the reported dump has 104 tables, 139 FKs (79 forward references), eight triggers
+and no function definitions. PostgreSQL schema output now creates all tables and local keys,
+then the required trigger functions, then foreign keys/triggers. The same phases apply to
+combined and split exports. MySQL/SQLite retain their DDL behaviour.
+
+Validation: lint, typecheck, production build; default suite 380 pass, six live-fixture
+tests skipped. The four new restore cases were separately enabled and passed on both
+PostgreSQL 16 and 18: combined/split, drops on/off, cyclic and composite FKs, repeat loads,
+actual trigger execution and no unmasked fixture emails. A shared function outside the
+search path is exported once; excluded and shadowed tables' functions are omitted. Applying
+the scanner to the reported file retained all 104 table definitions and deferred all 139
+FKs plus eight triggers. That original file was inspected only and must be regenerated to
+include the missing function definitions. Disposable fixture containers removed.
+
+2026-11-21: the owner reports that a fresh dump restored successfully with no errors.
+An independent Claude review of the current branch is requested in a new hc tab.
+
+Known limits remain: arbitrary helper functions called by trigger bodies and user-defined
+type dependencies are not recursively exported. No real source query/restore was run here;
+production row values were not printed or copied into tests.
+
+## Fixed 2026-11-20: PostgreSQL client-version preflight
+
+A real source reported PostgreSQL 18.7 while local `/usr/bin/pg_dump` is 16.15. The
+preflight incorrectly read `v` from `SHOW server_version`; PostgreSQL returns
+`server_version`, so the comparison never ran. Corrected the field and added three
+regressions (older client, compatible clients, missing executable). Default suite:
+376 pass, 2 opt-in database tests skipped; lint and typecheck pass.
+
+Environment update: PostgreSQL client 18.7 is now installed at
+`/usr/lib/postgresql/18/bin/pg_dump`, but `/usr/bin/pg_dump` (Debian's pg_wrapper) still
+selects 16.15 in this shell. Launch with
+`PATH="/usr/lib/postgresql/18/bin:$PATH" npm run dev` to select 18 explicitly. The owner
+installed the client; no system packages were changed by this session.
+The separately reported non-primary-key backfill warning is an existing documented
+limitation; no classification, anonymization or backfill behaviour was changed for it.
+
+## Built 2026-11-20: SSH source connections
+
+Password and private-key SSH authentication, migration 019, encrypted SSH secrets, native
+host-key trust/pinning and the connection editor are implemented. Real SSH forwarding,
+encrypted key, mismatch/cancel, disconnect, persistence and lifecycle tests added.
+
+Validation after Claude review: lint, typecheck, production build and **375 tests** pass with the opt-in live
+fixtures enabled (default run: 373 pass, 2 fixture tests skipped). MySQL 8.4 password-auth
+and PostgreSQL 16 encrypted-key extracts both restored successfully with anonymized emails;
+the configured database hostname cannot resolve directly, so both require the SSH forward.
+Postgres exercises real `pg_dump` through the tunnel. Disposable fixture containers removed.
+The built Electron UI saved/reloaded a key-file connection, required an SSH password on
+auth-method switch, and saved that password through the real OS keyring in a temporary
+profile. No renderer errors. Electron native rebuild also passed for `cpu-features`.
+
+Review fixes: preserve the passphrase for the same local key across host/user changes;
+expired trust dialogs cannot pin a key; forgetting trust is deferred to Save and Cancel
+preserves it. Main and renderer share the secret policy. Default regressions cover that
+policy and persisted SSH failure warnings. Both real database drivers fail an active stream
+when SSH is killed with a 20,000-row fixture. Electron regression checks verify passphrase
+retention, explicit clearing, Cancel preserving trust/test status, and Save clearing trust
+and invalidating cached status. Claude rechecked the fixes read-only with no new bugs found.
+
+Not verified: macOS/Windows UI or packaging; a real production/bastion connection. Agent auth,
+known_hosts parsing, SSH config aliases and multi-hop tunnels remain deferred.
 
 ## Dev environment repair — 2026-11-20
 

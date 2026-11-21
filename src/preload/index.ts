@@ -17,9 +17,12 @@ const config: ConfigApi = {
 
   listConnectionsByWorkspace: (workspaceId) =>
     ipcRenderer.invoke('config:listConnectionsByWorkspace', workspaceId),
-  createConnection: (input) => ipcRenderer.invoke('config:createConnection', input),
-  updateConnection: (id, patch) => ipcRenderer.invoke('config:updateConnection', id, patch),
+  createConnection: (input, secrets) =>
+    ipcRenderer.invoke('config:createConnection', input, secrets),
+  updateConnection: (id, patch, secrets) =>
+    ipcRenderer.invoke('config:updateConnection', id, patch, secrets),
   deleteConnection: (id) => ipcRenderer.invoke('config:deleteConnection', id),
+  hasSshSecret: (id) => ipcRenderer.invoke('config:hasSshSecret', id),
 
   setPassword: (connectionId, plaintext) =>
     ipcRenderer.invoke('config:setPassword', connectionId, plaintext),
@@ -92,6 +95,7 @@ const extract: ExtractApi = {
 }
 
 const system: SystemApi = {
+  chooseSshPrivateKey: () => ipcRenderer.invoke('system:chooseSshPrivateKey'),
   copyText: (text) => ipcRenderer.invoke('system:copyText', text),
   openPath: (path) => ipcRenderer.invoke('system:openPath', path),
   showItemInFolder: (path) => ipcRenderer.invoke('system:showItemInFolder', path),

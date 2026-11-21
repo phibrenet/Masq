@@ -2,6 +2,7 @@ import { once } from 'events'
 import type { Writable } from 'stream'
 import type { Row } from '@shared/types'
 import type { DumpDialect } from './dump-dialect'
+import type { TriggerFunction } from '../adapters/types'
 
 /** Rows per INSERT statement (spec §9: batched, never the whole table in memory). */
 const DEFAULT_BATCH = 500
@@ -34,6 +35,8 @@ export interface DumpPlan {
    * database that already holds a previous load of it (`Workspace.dropExistingTables`).
    */
   dropExistingTables?: boolean
+  /** Functions for the included PostgreSQL triggers, emitted after tables and before triggers. */
+  triggerFunctions?: TriggerFunction[]
 }
 
 /** Backpressure-aware write: wait for `drain` when the buffer is full. */
@@ -95,25 +98,40 @@ async function writeFooter(out: Writable, dialect: DumpDialect): Promise<void> {
  * with nothing — which is exactly what happened on a reported import. Interleaved, the same failure
  * costs one table: everything before it has been recreated, everything after it is untouched.
  *
- * This reverses an earlier choice to emit all drops first (see `.memory/decisions.md`). That was
- * made to stop a Postgres `DROP … CASCADE` reaching a constraint the same file had just created —
- * but for that to happen a child would have to be dropped after its parent was created, which
- * dependency order already prevents except among circularly-referencing tables, and those cannot
- * load from a combined dump either way (the `ALTER TABLE … ADD CONSTRAINT` for the first table in
- * the cycle names a table the file has not created yet). So the cascade risk was theoretical where
- * the blast radius is not.
+ * PostgreSQL foreign keys/triggers are deferred until every DROP/CREATE has finished, so a
+ * later DROP CASCADE cannot remove a constraint created earlier in the same file. PKs and
+ * unique indexes stay with table creation and exist before composite/non-PK FKs are added.
  */
 async function writeDdlSection(
   out: Writable,
   tables: DumpTable[],
   dialect: DumpDialect,
-  dropExisting: boolean
+  dropExisting: boolean,
+  triggerFunctions: TriggerFunction[] = []
 ): Promise<void> {
+  const deferred: string[] = []
   for (const t of tables) {
     await write(out, `--\n-- Table: ${t.table}\n--\n`)
     if (dropExisting) await write(out, `${dialect.dropTable(t.table)}\n`)
     // `SHOW CREATE TABLE` has no trailing semicolon; ensure exactly one.
-    await write(out, `${t.ddl.trimEnd().replace(/;?$/, ';')}\n\n`)
+    const parts = dialect.splitTableDdl?.(t.ddl)
+    const ddl = parts?.tableDdl ?? t.ddl
+    deferred.push(...(parts?.deferredDdl ?? []))
+    await write(out, `${ddl.trimEnd().replace(/;?$/, ';')}\n\n`)
+  }
+  if (triggerFunctions.length) {
+    await write(out, '--\n-- Trigger functions\n--\n')
+    const schemas = new Set(triggerFunctions.map((fn) => fn.schema))
+    for (const schema of schemas) {
+      if (schema !== 'public')
+        await write(out, `CREATE SCHEMA IF NOT EXISTS ${dialect.id(schema)};\n`)
+    }
+    for (const fn of triggerFunctions)
+      await write(out, `${fn.ddl.trimEnd().replace(/;?$/, ';')}\n\n`)
+  }
+  if (deferred.length) {
+    await write(out, '--\n-- Foreign keys and triggers: all tables and functions now exist\n--\n')
+    for (const ddl of deferred) await write(out, `${ddl.trimEnd().replace(/;?$/, ';')}\n\n`)
   }
 }
 
@@ -189,7 +207,13 @@ export async function writeCombinedDump(out: Writable, plan: DumpPlan): Promise<
   await write(out, `${plan.dialect.disableForeignKeys}\n\n`)
   // The FK toggle opened above covers the drops too — a DROP is refused while an FK points at the
   // table, and dependency order puts parents first, so the drops run child-last.
-  await writeDdlSection(out, plan.tables, plan.dialect, !!plan.dropExistingTables)
+  await writeDdlSection(
+    out,
+    plan.tables,
+    plan.dialect,
+    !!plan.dropExistingTables,
+    plan.triggerFunctions
+  )
   await writeDataSection(out, plan.tables, plan.dialect, batchSize)
   await writeSequenceResets(out, plan.tables, plan.dialect)
   await writeFooter(out, plan.dialect)
@@ -214,7 +238,13 @@ export async function writeSplitDump(
   // order, so nothing needs suppressing. Dropping is the case that does: an FK from a table outside
   // the dump set would refuse the DROP, and the toggle is the same one the data file uses.
   if (plan.dropExistingTables) await write(schemaOut, `${plan.dialect.disableForeignKeys}\n\n`)
-  await writeDdlSection(schemaOut, plan.tables, plan.dialect, !!plan.dropExistingTables)
+  await writeDdlSection(
+    schemaOut,
+    plan.tables,
+    plan.dialect,
+    !!plan.dropExistingTables,
+    plan.triggerFunctions
+  )
   if (plan.dropExistingTables) await write(schemaOut, `${plan.dialect.enableForeignKeys}\n`)
   if (plan.dialect.sessionRestore) await write(schemaOut, `${plan.dialect.sessionRestore}\n`)
 

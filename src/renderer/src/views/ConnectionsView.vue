@@ -60,6 +60,8 @@ function onMenu(c: Connection, key: string): void {
 async function testConnection(c: Connection): Promise<void> {
   try {
     const result = await tests.test(c.id)
+    // A successful first SSH handshake may have pinned the server key in main.
+    await connections.loadForWorkspace(c.workspaceId).catch(() => {})
     if (result.ok) {
       message.success(`Connected to "${c.label}" — found ${result.tableCount ?? 0} tables.`)
     } else {
@@ -159,6 +161,13 @@ function retryLoad(): void {
           <UiBadge :tone="c.role === 'source' ? 'ok' : 'warn'" variant="outline">{{
             c.role
           }}</UiBadge>
+          <UiBadge
+            v-if="c.sshEnabled"
+            tone="muted"
+            variant="outline"
+            :title="`Via ${c.sshHost}:${c.sshPort ?? 22}`"
+            >SSH tunnel</UiBadge
+          >
           <span class="conn__ro" title="Masq only ever reads from a connection">
             <AppIcon name="lock" :size="12" />
             Read-only

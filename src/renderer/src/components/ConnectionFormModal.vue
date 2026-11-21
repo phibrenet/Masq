@@ -8,14 +8,16 @@ import {
   NInputNumber,
   NModal,
   NSelect,
+  NSwitch,
   useMessage,
   type FormInst,
   type FormRules
 } from 'naive-ui'
 import type { ConnectionInput } from '@shared/api'
-import type { Connection, ConnectionRole, Dialect } from '@shared/types'
+import type { Connection, ConnectionRole, Dialect, SshAuthMethod } from '@shared/types'
 import { useConnectionsStore } from '@renderer/stores/connections'
 import { useWorkspaceStore } from '@renderer/stores/workspace'
+import { sshSecretMatches } from '@shared/ssh'
 
 /**
  * Create/edit-a-connection modal. Binds to the config store over IPC via the connections
@@ -70,6 +72,14 @@ interface FormState {
   password: string
   searchPath: string
   filePath: string
+  sshEnabled: boolean
+  sshHost: string
+  sshPort: number | null
+  sshUsername: string
+  sshAuthMethod: SshAuthMethod
+  sshPrivateKeyPath: string
+  sshSecret: string
+  clearSshSecret: boolean
 }
 
 function blankForm(): FormState {
@@ -83,7 +93,15 @@ function blankForm(): FormState {
     username: '',
     password: '',
     searchPath: '',
-    filePath: ''
+    filePath: '',
+    sshEnabled: false,
+    sshHost: '',
+    sshPort: 22,
+    sshUsername: '',
+    sshAuthMethod: 'privateKey',
+    sshPrivateKeyPath: '',
+    sshSecret: '',
+    clearSshSecret: false
   }
 }
 
@@ -100,21 +118,75 @@ function fromConnection(c: Connection): FormState {
     username: c.username ?? '',
     password: '',
     searchPath: c.searchPath ?? '',
-    filePath: c.filePath ?? ''
+    filePath: c.filePath ?? '',
+    sshEnabled: c.sshEnabled ?? false,
+    sshHost: c.sshHost ?? '',
+    sshPort: c.sshPort ?? 22,
+    sshUsername: c.sshUsername ?? '',
+    sshAuthMethod: c.sshAuthMethod ?? 'privateKey',
+    sshPrivateKeyPath: c.sshPrivateKeyPath ?? '',
+    sshSecret: '',
+    clearSshSecret: false
   }
 }
 
 const model = reactive<FormState>(blankForm())
 const formRef = ref<FormInst | null>(null)
 const saving = ref(false)
+const savedSshSecret = ref(false)
+const fingerprint = ref<string>()
+const forgetFingerprint = ref(false)
+const sshAuthOptions = [
+  { label: 'Private key file', value: 'privateKey' },
+  { label: 'Password', value: 'password' }
+]
+const sameSshIdentity = computed(() => {
+  return sshSecretMatches(props.connection, {
+    sshEnabled: model.sshEnabled,
+    sshHost: model.sshHost.trim(),
+    sshPort: model.sshPort ?? 22,
+    sshUsername: model.sshUsername.trim(),
+    sshAuthMethod: model.sshAuthMethod,
+    sshPrivateKeyPath: model.sshPrivateKeyPath.trim()
+  })
+})
+const keepSshSecret = computed(
+  () => savedSshSecret.value && sameSshIdentity.value && !model.clearSshSecret
+)
+
+async function chooseKey(): Promise<void> {
+  try {
+    const path = await window.api.system.chooseSshPrivateKey()
+    if (path) model.sshPrivateKeyPath = path
+  } catch (err) {
+    message.error((err as Error).message)
+  }
+}
 
 const isFileBased = computed(() => model.dialect === 'sqlite')
 /** Search path is a Postgres-only concept — MySQL's schema *is* its database. */
 const isPostgres = computed(() => model.dialect === 'postgres')
 
 // Seed the form each time the modal opens — from the connection being edited, or blank.
-watch(show, (open) => {
-  if (open) Object.assign(model, props.connection ? fromConnection(props.connection) : blankForm())
+watch(show, async (open) => {
+  if (!open) {
+    model.password = ''
+    model.sshSecret = ''
+    return
+  }
+  Object.assign(model, props.connection ? fromConnection(props.connection) : blankForm())
+  fingerprint.value = props.connection?.sshHostFingerprint
+  forgetFingerprint.value = false
+  savedSshSecret.value = false
+  const id = props.connection?.id
+  if (id) {
+    try {
+      const saved = await window.api.config.hasSshSecret(id)
+      if (show.value && props.connection?.id === id) savedSshSecret.value = saved
+    } catch (err) {
+      message.error((err as Error).message)
+    }
+  }
 })
 
 // When the dialect changes, drop the new default port in — but keep a custom or loaded
@@ -137,6 +209,25 @@ const rules = computed<FormRules>(() => ({
   host: isFileBased.value
     ? {}
     : { required: true, message: 'A host is required', trigger: ['blur', 'input'] },
+  sshHost:
+    !isFileBased.value && model.sshEnabled
+      ? { required: true, message: 'An SSH host is required', trigger: ['blur', 'input'] }
+      : {},
+  sshUsername:
+    !isFileBased.value && model.sshEnabled
+      ? { required: true, message: 'An SSH username is required', trigger: ['blur', 'input'] }
+      : {},
+  sshPrivateKeyPath:
+    !isFileBased.value && model.sshEnabled && model.sshAuthMethod === 'privateKey'
+      ? { required: true, message: 'Choose the private key file', trigger: ['blur', 'input'] }
+      : {},
+  sshSecret:
+    !isFileBased.value &&
+    model.sshEnabled &&
+    model.sshAuthMethod === 'password' &&
+    !keepSshSecret.value
+      ? { required: true, message: 'An SSH password is required', trigger: ['blur', 'input'] }
+      : {},
   database: isFileBased.value
     ? {}
     : { required: true, message: 'A database is required', trigger: ['blur', 'input'] }
@@ -148,10 +239,11 @@ function toInput(workspaceId: string): ConnectionInput {
     workspaceId,
     label: model.label.trim(),
     dialect: model.dialect,
-    role: model.role
+    role: model.role,
+    forgetSshHostKey: forgetFingerprint.value
   }
   if (isFileBased.value) {
-    return { ...base, filePath: model.filePath.trim() }
+    return { ...base, filePath: model.filePath.trim(), sshEnabled: false }
   }
   return {
     ...base,
@@ -160,7 +252,14 @@ function toInput(workspaceId: string): ConnectionInput {
     database: model.database.trim(),
     username: model.username.trim() || undefined,
     // Only persisted for Postgres; blank stays undefined so the engine falls back to `public`.
-    searchPath: isPostgres.value ? model.searchPath.trim() || undefined : undefined
+    searchPath: isPostgres.value ? model.searchPath.trim() || undefined : undefined,
+    sshEnabled: model.sshEnabled,
+    sshHost: model.sshHost.trim(),
+    sshPort: model.sshPort ?? 22,
+    sshUsername: model.sshUsername.trim(),
+    sshAuthMethod: model.sshAuthMethod,
+    sshPrivateKeyPath:
+      model.sshAuthMethod === 'privateKey' ? model.sshPrivateKeyPath.trim() : undefined
   }
 }
 
@@ -178,12 +277,18 @@ async function submit(): Promise<void> {
 
   saving.value = true
   try {
-    const password = isFileBased.value ? undefined : model.password || undefined
+    const secrets = {
+      password: isFileBased.value ? undefined : model.password || undefined,
+      sshSecret:
+        isFileBased.value || !model.sshEnabled
+          ? undefined
+          : model.sshSecret || (model.clearSshSecret ? '' : undefined)
+    }
     if (isEdit.value && props.connection) {
-      const updated = await connections.update(props.connection.id, toInput(workspaceId), password)
+      const updated = await connections.update(props.connection.id, toInput(workspaceId), secrets)
       message.success(`Connection "${updated?.label ?? model.label.trim()}" updated.`)
     } else {
-      const created = await connections.create(toInput(workspaceId), password)
+      const created = await connections.create(toInput(workspaceId), secrets)
       message.success(`Connection "${created.label}" saved.`)
     }
     show.value = false
@@ -200,7 +305,7 @@ async function submit(): Promise<void> {
     v-model:show="show"
     preset="card"
     :title="isEdit ? 'Edit connection' : 'New connection'"
-    :style="{ width: '520px', maxWidth: '92vw' }"
+    :style="{ width: '520px', maxWidth: '92vw', maxHeight: '90vh', overflowY: 'auto' }"
     :mask-closable="!saving"
   >
     <n-form ref="formRef" :model="model" :rules="rules" label-placement="top">
@@ -229,9 +334,19 @@ async function submit(): Promise<void> {
             <n-input v-model:value="model.host" placeholder="127.0.0.1" />
           </n-form-item>
           <n-form-item label="Port" path="port" class="row__port">
-            <n-input-number v-model:value="model.port" :show-button="false" placeholder="3306" />
+            <n-input-number
+              v-model:value="model.port"
+              :show-button="false"
+              :min="1"
+              :max="65535"
+              :precision="0"
+              placeholder="3306"
+            />
           </n-form-item>
         </div>
+        <p v-if="model.sshEnabled" class="hint">
+          Database host and port are reached from the SSH server.
+        </p>
         <n-form-item label="Database" path="database">
           <n-input v-model:value="model.database" placeholder="app_production" />
         </n-form-item>
@@ -255,6 +370,85 @@ async function submit(): Promise<void> {
             />
           </n-form-item>
         </div>
+        <n-form-item label="Connect over SSH">
+          <n-switch v-model:value="model.sshEnabled" :disabled="model.dialect === 'mssql'" />
+        </n-form-item>
+        <template v-if="model.sshEnabled">
+          <div class="row">
+            <n-form-item label="SSH host" path="sshHost" class="row__host">
+              <n-input v-model:value="model.sshHost" placeholder="bastion.example.com" />
+            </n-form-item>
+            <n-form-item label="SSH port" path="sshPort" class="row__port">
+              <n-input-number
+                v-model:value="model.sshPort"
+                :show-button="false"
+                :min="1"
+                :max="65535"
+                :precision="0"
+                placeholder="22"
+              />
+            </n-form-item>
+          </div>
+          <n-form-item label="SSH username" path="sshUsername">
+            <n-input v-model:value="model.sshUsername" placeholder="deploy" />
+          </n-form-item>
+          <n-form-item label="SSH authentication">
+            <n-select
+              v-model:value="model.sshAuthMethod"
+              :options="sshAuthOptions"
+              @update:value="model.sshSecret = ''"
+            />
+          </n-form-item>
+          <n-form-item
+            v-if="model.sshAuthMethod === 'privateKey'"
+            label="Private key file"
+            path="sshPrivateKeyPath"
+          >
+            <div class="key-picker">
+              <n-input v-model:value="model.sshPrivateKeyPath" placeholder="~/.ssh/id_ed25519" />
+              <n-button @click="chooseKey">Browse…</n-button>
+            </div>
+            <template #feedback
+              >Choose the private key, not the .pub file. The public key belongs on the SSH
+              server.</template
+            >
+          </n-form-item>
+          <n-form-item
+            :label="
+              model.sshAuthMethod === 'password' ? 'SSH password' : 'Key passphrase (optional)'
+            "
+            path="sshSecret"
+          >
+            <n-input
+              v-model:value="model.sshSecret"
+              type="password"
+              show-password-on="click"
+              :placeholder="
+                keepSshSecret
+                  ? 'Leave blank to keep saved secret'
+                  : 'Stored encrypted in the OS keychain'
+              "
+            />
+          </n-form-item>
+          <n-form-item
+            v-if="savedSshSecret && sameSshIdentity && model.sshAuthMethod === 'privateKey'"
+            label="Clear saved passphrase"
+          >
+            <n-switch v-model:value="model.clearSshSecret" />
+          </n-form-item>
+          <div v-if="fingerprint" class="hint">
+            <p>
+              Trusted SSH host key: <code>{{ fingerprint }}</code>
+            </p>
+            <p v-if="forgetFingerprint">The trusted host key will be forgotten when you save.</p>
+            <n-button size="small" @click="forgetFingerprint = !forgetFingerprint">{{
+              forgetFingerprint ? 'Keep trusted host key' : 'Forget trusted host key'
+            }}</n-button>
+          </div>
+          <p v-else class="hint">
+            On the first connection, compare and trust the server’s host key fingerprint.
+          </p>
+        </template>
       </template>
     </n-form>
 
@@ -277,14 +471,31 @@ async function submit(): Promise<void> {
 
 .row__item {
   flex: 1;
+  min-width: 0;
 }
 
 .row__host {
   flex: 3;
+  min-width: 0;
 }
 
 .row__port {
   flex: 1;
+  min-width: 0;
+}
+
+.key-picker {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.key-picker > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.hint {
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .footer {

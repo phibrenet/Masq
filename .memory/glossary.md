@@ -11,6 +11,10 @@ isn't self-explanatory. One or two sentences each.
 - **Connection** — a stored source (or target) DB definition: dialect, host/port/db/user
   or file path. The password is *not* here — it lives encrypted in `credentials`.
 
+- **SSH tunnel / bastion** — an authenticated connection through an SSH server to a private
+  MySQL/Postgres database. Database host/port are resolved from that server; Masq binds its
+  temporary local forward to loopback and pins the server's SHA256 host-key fingerprint.
+
 - **Config store** — the app's *own* SQLite database in `userData`
   (`config.sqlite3`). Holds workspaces/rules/runs. Never the source or target DB, and
   never secrets.
@@ -116,6 +120,10 @@ isn't self-explanatory. One or two sentences each.
   schema once and re-runs just the data file for fresh anonymized snapshots.
 
 - **Reference vs. transactional** — see *Table classification* above.
+
+- **PostgreSQL schema phases** — create all tables and their local keys first, then required
+  trigger functions, then foreign keys and triggers. This permits forward and circular references
+  while ensuring referenced tables, unique keys and trigger functions exist at creation time.
 
 - **Rowid alias** — a SQLite column declared *exactly* `INTEGER PRIMARY KEY` in a rowid table:
   it becomes another name for the row's internal `rowid` and auto-assigns on a NULL insert, whether

@@ -9,6 +9,92 @@ Entries below marked _(from spec v1)_ were established in the initial technical 
 
 ---
 
+## 2026-11-21 — Leave built-in PostgreSQL trigger functions to the destination
+
+Independent review found that a user trigger can call a built-in `pg_catalog` function
+without being an internal trigger itself. `NOT tgisinternal` and the extension filter
+therefore did not prevent exporting `tsvector_update_trigger` or
+`suppress_redundant_updates_trigger`. Recreating these fails for ordinary roles and can
+rewrite a catalog entry as superuser. Exclude functions in `pg_catalog` during discovery;
+keep their trigger declarations, which call the destination's built-ins. The writer no
+longer special-cases that schema as a place for exported function definitions.
+
+The existing cross-table dependency limitation for CREATE POLICY, CREATE RULE and ATTACH
+PARTITION is documented explicitly; this change does not attempt to order all schema objects.
+
+## 2026-11-20 — PostgreSQL schema phases and trigger function definitions
+
+A reported 104-table dump contained 79 forward FK references and eight triggers with no
+function definitions. Per-table `pg_dump --schema-only --table` output mixes table-local
+objects with FKs/triggers and does not include dependent functions. Topological ordering
+alone cannot resolve cycles or guarantee all referenced unique keys exist.
+
+Postgres now partitions each table's DDL into table-local statements (CREATE, sequences,
+PKs/unique indexes/defaults) and deferred foreign keys/triggers/comments. The writer emits
+every table first, then required trigger functions, then all deferred statements, then data.
+Both combined and split schema files use the same path. MySQL/SQLite retain their existing
+DDL behaviour and per-table DROP/CREATE placement. Deferred PostgreSQL constraints also
+avoid a later DROP CASCADE erasing a constraint created earlier in the same export.
+
+The PostgreSQL adapter reads `pg_get_functiondef` for non-internal triggers on the included,
+search-path-resolved tables, deduplicated by function OID. Function schemas are created as
+needed. Extension-owned functions are left to the extension preamble. Definitions, including
+dollar-quoted bodies and comments, are preserved; they are schema code, not anonymized rows.
+The SQL statement scanner respects strings, identifiers, comments and dollar quoting so a
+semicolon or DDL-like string cannot split/misclassify a statement. This does not recursively
+export helpers called by function bodies or arbitrary user-defined types.
+
+## 2026-11-20 — Read the real server-version column in pg_dump preflight
+
+`SHOW server_version` returns `server_version`, not `v`. The existing check read an absent
+field and silently skipped the client/server comparison, so pg_dump 16 reached an 18 server
+and failed on the first table instead of giving the intended installation guidance. Read
+the real field and test the reported Ubuntu version strings, matching/newer clients and a
+missing executable. This does not replace the local pg_dump dependency; install client tools
+at least as new as the server. pg_dump remains local even for SSH connections.
+
+## 2026-11-20 — SSH review follow-up: passphrase ownership and deferred trust changes
+
+Supersedes the secret-clearing policy in the SSH implementation entry below: a key passphrase
+only unlocks a local key, so retain it when changing SSH host/port/user and clear it when the
+key path or auth method changes, or SSH is disabled. Passwords remain bound to host/port/user.
+Main and the renderer share `sshSecretMatches` so their keep/clear behaviour agrees.
+
+The tunnel passes its lifetime AbortSignal to host verification. A trust decision made after
+failure/timeout cannot pin a key. Concurrent operations share the dialog, with each checking
+its own lifetime before pinning; one expired operation does not invalidate another live one.
+
+Forgetting a trusted key is now an update-only flag saved in the same transaction as connection
+settings and secrets, rather than an immediate IPC operation. Cancel preserves trust, and
+Save already invalidates the cached connection test. The form makes the pending action clear
+and lets the user undo it. Default tests cover SSH run warnings and the shared secret policy;
+the live fixture adds transport loss during real MySQL/Postgres driver streams.
+
+## 2026-11-20 — SSH tunnel connections with password or private-key authentication
+
+Implement the single-bastion design in `docs/ssh-tunnel.md` for MySQL/Postgres. `ssh2` owns
+an explicit `127.0.0.1` ephemeral listener per `withSourceAdapter` operation. Both knex and
+Postgres's `pg_dump` receive the effective forwarded endpoint; closing the pool precedes
+closing the tunnel, including error paths. There is no direct-route or auth-method fallback.
+
+Migration 019 adds SSH settings and a separate `ssh_credentials` table. This supersedes the
+plan's proposed nullable column: it allows SSH-only secrets without rebuilding existing DB
+credentials or inventing an encrypted empty DB password. SSH passwords/key passphrases use
+the same safeStorage/keyring checks. Only a private key's path is stored; `.pub` files cannot
+authenticate. Agent authentication and known_hosts parsing are deferred.
+
+First use requires a native main-process host-key trust dialog (cancel is the default).
+The SHA256 pin is written only by main after acceptance; connection input cannot set it.
+Changed keys fail without an override prompt; the edit form has an explicit forget action.
+Changing SSH host/port or disabling SSH clears trust. Changing SSH identity/auth/key clears
+the old SSH secret, so a password cannot become a key passphrase or reach a different host.
+Concurrent first-use operations share the trust prompt.
+
+Create/update IPC now accepts a separate write-only secrets argument, saving settings and
+both encrypted secrets in one SQLite transaction. This avoids partial saves if the keyring
+fails, especially when editing both database and SSH credentials. No secret read-back API is
+exposed. Blank form secrets keep saved values; an explicit empty secret clears one.
+
 ## 2026-11-04 — Field-strategy exceptions, and ID-keyed email generators
 
 **Why.** A consumer of the dumps asked for staff to be masked like every other user, and for every

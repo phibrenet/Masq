@@ -94,10 +94,13 @@ sampling) if any root table is in the millions.
 - MSSQL: best-effort, budget extra QA time (TDS auth/encoding edge cases)
 
 **Connectivity — SSH tunnelling:** a production database is normally not directly
-routable (bound to a private interface, reachable only via a bastion). Designed in
+routable (bound to a private interface, reachable only via a bastion). Implemented in
 [docs/ssh-tunnel.md](ssh-tunnel.md): a local port forward via `ssh2`, opened and torn
 down inside `withSourceAdapter` — the single choke point every source access already
-passes through. Server-based dialects only. **Not built yet.**
+passes through. MySQL/Postgres support password or private-key authentication (with an
+optional passphrase). SSH secrets are stored encrypted, private keys remain in their files,
+and first-use host-key trust uses a native dialog before pinning. `pg_dump` shares the
+forwarded endpoint. Agent authentication and known_hosts parsing are deferred.
 
 ---
 
@@ -241,11 +244,24 @@ ALTER TABLE workspaces ADD COLUMN dump_output_mode TEXT NOT NULL
 
 **Ordering & FK safety:**
 - Tables written in topological (dependency) order for readability
+- PostgreSQL creates **all tables and local keys first**, then required trigger functions,
+  then foreign keys/triggers, before data. This handles forward/cyclic/composite references;
+  per-table `pg_dump` alone does not include trigger function definitions. Function bodies
+  are schema code and are preserved, not anonymized. Arbitrary helper functions and custom
+  type dependencies are not recursively exported.
+  Built-in `pg_catalog` trigger functions are supplied by the destination and are not exported.
+  Cross-table dependencies in policies, rules and partition attachments remain a restore limit.
 - FK checks disabled for the duration of load (`SET FOREIGN_KEY_CHECKS=0` /
   `SET CONSTRAINTS ALL DEFERRED` / `PRAGMA foreign_keys=OFF`) — this also
   sidesteps circular-reference edge cases a perfect topo sort can't resolve alone
 - In split mode, only the **data file** needs the FK-toggle header; the schema
   file is pure DDL
+
+PostgreSQL restore regression fixtures run with
+`MASQ_PG_SCHEMA_TEST_PORT=<disposable-port> npm test -- tests/integration/postgres-schema.spec.ts`.
+They require a disposable server with database `masq_schema_fixture`, user `postgres` and
+password `masq-schema-fixture`; they recreate test schemas and `masq_schema_restore` on that
+server. Never point this fixture at an existing project database. They use real `pg_dump`.
 
 **Re-runnable data files:** in split mode, the data file should `TRUNCATE`/
 `DELETE FROM` each table (reverse dependency order) before inserting, so devs
@@ -369,6 +385,7 @@ applied idempotently on app start.
 9. Run history UI (row counts, status, output file links)
 10. ~~SQL Server adapter~~ — **deferred to v2 (2026-08-20)**; v1 ends at step 9.
 
-**Post-v1, designed but unscheduled:** SSH tunnelling for source connections
-([docs/ssh-tunnel.md](ssh-tunnel.md)) — arguably the highest-value thing left, since it
-determines whether Masq can reach a real production at all.
+**Built 2026-11-20:** SSH tunnelling for MySQL/Postgres source connections
+([docs/ssh-tunnel.md](ssh-tunnel.md)), using passwords or private key files with optional
+passphrases. Live synthetic extracts and restores cover both dialects; macOS/Windows
+packaging and real bastion validation remain open.

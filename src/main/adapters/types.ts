@@ -16,6 +16,11 @@ export interface ExtensionInfo {
   schema: string
 }
 
+export interface TriggerFunction {
+  schema: string
+  ddl: string
+}
+
 /**
  * Common interface each dialect adapter implements (spec §4). `knex` handles query
  * *execution*; introspection is genuinely NOT unified across dialects (SQLite has no
@@ -85,6 +90,8 @@ export interface DbAdapter {
   getForeignKeys(): Promise<ForeignKeyRef[]>
   /** Dialect-native schema DDL for one table (MySQL: `SHOW CREATE TABLE`). */
   getCreateTableStatement(table: string): Promise<string>
+  /** PostgreSQL trigger functions referenced by the included tables, deduplicated by OID. */
+  getTriggerFunctions?(tables: string[]): Promise<TriggerFunction[]>
   /** Cheap round-trip to confirm the connection is live and authenticated. */
   ping(): Promise<void>
 

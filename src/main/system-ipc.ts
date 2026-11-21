@@ -18,6 +18,17 @@ import { TITLE_BAR_COLORS, TITLE_BAR_HEIGHT } from './title-bar'
 const handlers: {
   [K in keyof SystemApi]: (...args: Parameters<SystemApi[K]>) => ReturnType<SystemApi[K]>
 } = {
+  chooseSshPrivateKey: async () => {
+    const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const options = {
+      title: 'Choose SSH private key (not the .pub file)',
+      properties: ['openFile', 'showHiddenFiles'] as Array<'openFile' | 'showHiddenFiles'>
+    }
+    const result = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options)
+    return result.canceled ? null : (result.filePaths[0] ?? null)
+  },
   copyText: async (text) => {
     clipboard.writeText(text)
   },
